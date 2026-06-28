@@ -51,6 +51,26 @@ const scriptedToolCallEvents: BaseEvent[] = [
   { type: EventType.RUN_FINISHED } as BaseEvent
 ];
 
+const scriptedToolCallEventsWithResult: BaseEvent[] = [
+  {
+    toolCallId: "call-1",
+    toolCallName: "setThemeColor",
+    type: EventType.TOOL_CALL_START
+  } as BaseEvent,
+  {
+    delta: '{"color":"blue"}',
+    toolCallId: "call-1",
+    type: EventType.TOOL_CALL_ARGS
+  } as BaseEvent,
+  { toolCallId: "call-1", type: EventType.TOOL_CALL_END } as BaseEvent,
+  {
+    content: '{"ok":true}',
+    toolCallId: "call-1",
+    type: "TOOL_CALL_RESULT"
+  } as BaseEvent,
+  { type: EventType.RUN_FINISHED } as BaseEvent
+];
+
 describe("OpenBoxMiddleware.run", () => {
   it("emits WorkflowStarted, user_input signal, agent_output signal, and WorkflowCompleted for a text-only run", async () => {
     const { controller, evaluateMock } = buildController();
@@ -118,6 +138,7 @@ describe("OpenBoxMiddleware.run", () => {
 
     expect(startedCall.activity_id).toBe("call-1");
     expect(startedCall.activity_type).toBe("setThemeColor");
+    expect(startedCall.activity_input).toEqual({ color: "blue" });
     expect(startedCall.tool_origin).toBe("copilotkit-observed");
     expect(startedCall.frontend).toBe(false);
 
@@ -125,6 +146,28 @@ describe("OpenBoxMiddleware.run", () => {
     expect(completedCall.activity_input).toEqual({ color: "blue" });
     expect(completedCall.status).toBe("completed");
     expect(typeof completedCall.duration_ms).toBe("number");
+  });
+
+  it("emits ActivityCompleted activity_output from TOOL_CALL_RESULT", async () => {
+    const { controller, evaluateMock } = buildController();
+    const middleware = createOpenBoxMiddleware(controller);
+    const agent = new ScriptedAgent({ events: scriptedToolCallEventsWithResult });
+
+    await collectEvents(middleware.run(buildRunAgentInput(), agent));
+
+    const calls = evaluateMock.mock.calls.map(
+      args => args[0] as Record<string, unknown>
+    );
+    const startedCall = calls.find(
+      payload => payload.event_type === WorkflowEventType.ACTIVITY_STARTED
+    );
+    const completedCall = calls.find(
+      payload => payload.event_type === WorkflowEventType.ACTIVITY_COMPLETED
+    );
+
+    expect(startedCall?.activity_input).toEqual({ color: "blue" });
+    expect(completedCall?.activity_input).toEqual({ color: "blue" });
+    expect(completedCall?.activity_output).toEqual({ ok: true });
   });
 
   it("emits WorkflowFailed on RUN_ERROR", async () => {
