@@ -17,7 +17,18 @@ export const COPILOTKIT_EVENT_SOURCE = "copilotkit-middleware";
 export const USER_INPUT_SIGNAL_NAME = "user_input";
 export const AGENT_OUTPUT_SIGNAL_NAME = "agent_output";
 
-export interface WorkflowStartedInput {
+/**
+ * Optional OpenBox multi-agent fields, mixed into the emitter inputs. Both are
+ * omitted from the wire payload when undefined, so single-agent runs are byte
+ * -for-byte unchanged. `parentWorkflowId` is only meaningful on a CHILD
+ * agent's workflow-lifecycle events; the CopilotKit parent never sets it.
+ */
+export interface MultiAgentEventFields {
+  multiAgentSessionId?: string | undefined;
+  parentWorkflowId?: string | undefined;
+}
+
+export interface WorkflowStartedInput extends MultiAgentEventFields {
   agentId?: string | undefined;
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
@@ -30,6 +41,7 @@ export interface WorkflowStartedInput {
 export interface SignalEmitInput {
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  multiAgentSessionId?: string | undefined;
   payload: unknown;
   runId: string;
   signalName: string;
@@ -43,6 +55,7 @@ export interface ActivityStartedInput {
   frontend: boolean;
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  multiAgentSessionId?: string | undefined;
   runId: string;
   toolName: string;
   toolOrigin: string;
@@ -58,6 +71,7 @@ export interface ActivityCompletedInput {
   error?: Record<string, unknown> | undefined;
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
+  multiAgentSessionId?: string | undefined;
   runId: string;
   startTime?: number | undefined;
   status: "completed" | "failed" | "aborted";
@@ -65,7 +79,7 @@ export interface ActivityCompletedInput {
   workflowId: string;
 }
 
-export interface WorkflowCompletedInput {
+export interface WorkflowCompletedInput extends MultiAgentEventFields {
   agentOutput?: unknown;
   durationMs?: number | undefined;
   endTime?: number | undefined;
@@ -76,12 +90,28 @@ export interface WorkflowCompletedInput {
   workflowId: string;
 }
 
-export interface WorkflowFailedInput {
+export interface WorkflowFailedInput extends MultiAgentEventFields {
   error: Record<string, unknown>;
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
   runId: string;
   workflowId: string;
+}
+
+/**
+ * Input for `emitHandoff`. The Handoff describes the PARENT's workflow
+ * identity (`workflow_id`/`workflow_type`/`task_queue` default to CopilotKit)
+ * but MUST be sent authenticated as the CHILD agent — pass the child-scoped
+ * `OpenBoxClient` as the second arg so Core resolves `to_agent` to the child.
+ */
+export interface HandoffEmitInput {
+  fromAgentDid: string;
+  metadata?: Record<string, unknown> | undefined;
+  multiAgentSessionId: string;
+  runId: string;
+  taskQueue?: string | undefined;
+  workflowId: string;
+  workflowType?: string | undefined;
 }
 
 /**
@@ -125,6 +155,7 @@ export class OpenBoxCopilotKitEmitter {
       ...(input.goal ? { goal: input.goal } : {}),
       ...(input.agentId ? { agent_id: input.agentId } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...multiAgentFields(input),
       run_id: input.runId,
       thread_id: input.threadId,
       workflow_id: input.workflowId,
@@ -146,6 +177,7 @@ export class OpenBoxCopilotKitEmitter {
       event_type: WorkflowEventType.SIGNAL_RECEIVED,
       ...(input.goal ? { goal: input.goal } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...multiAgentFields(input),
       run_id: input.runId,
       signal_args: serializeSignalArgs(input.payload),
       signal_name: input.signalName,
@@ -172,6 +204,7 @@ export class OpenBoxCopilotKitEmitter {
       frontend: input.frontend,
       ...(input.goal ? { goal: input.goal } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...multiAgentFields(input),
       run_id: input.runId,
       tool_origin: input.toolOrigin,
       workflow_id: input.workflowId,
@@ -201,6 +234,7 @@ export class OpenBoxCopilotKitEmitter {
       event_type: WorkflowEventType.ACTIVITY_COMPLETED,
       ...(input.goal ? { goal: input.goal } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...multiAgentFields(input),
       run_id: input.runId,
       ...(typeof input.startTime === "number"
         ? { start_time: input.startTime }
@@ -228,6 +262,7 @@ export class OpenBoxCopilotKitEmitter {
       event_type: WorkflowEventType.WORKFLOW_COMPLETED,
       ...(input.goal ? { goal: input.goal } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...multiAgentFields(input),
       run_id: input.runId,
       ...(typeof input.startTime === "number"
         ? { start_time: input.startTime }
@@ -252,6 +287,7 @@ export class OpenBoxCopilotKitEmitter {
       event_type: WorkflowEventType.WORKFLOW_FAILED,
       ...(input.goal ? { goal: input.goal } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
+      ...multiAgentFields(input),
       run_id: input.runId,
       workflow_id: input.workflowId,
       workflow_type: COPILOTKIT_WORKFLOW_TYPE
@@ -264,14 +300,70 @@ export class OpenBoxCopilotKitEmitter {
     });
   }
 
+  /**
+   * Emit a multi-agent `Handoff` marker. MUST be called with a `client` scoped
+   * to the CHILD agent's identity — Core derives the handoff's `to_agent` from
+   * the authenticated emitter, and `from_agent_did` carries the parent. When
+   * `client` is omitted the payload is surfaced to `onEvent` (so a remote
+   * child runtime can pick up the embedded context) but NOT sent to Core:
+   * emitting under the parent identity would record a self-to-self handoff.
+   */
+  public async emitHandoff(
+    input: HandoffEmitInput,
+    client?: OpenBoxClient
+  ): Promise<GovernanceVerdictResponse | null> {
+    // Core's ValidateHandoffPayload rejects a Handoff missing either field, so
+    // never put an invalid marker on the wire — keep the invariant local rather
+    // than relying solely on the caller.
+    if (!input.fromAgentDid || !input.multiAgentSessionId) {
+      this.#logger.warn?.({
+        note: "openbox emitHandoff: missing from_agent_did or multi_agent_session_id — skipping handoff",
+        workflow_id: input.workflowId
+      });
+      return null;
+    }
+
+    const payload = withBaseEnvelope({
+      event_type: WorkflowEventType.HANDOFF,
+      from_agent_did: input.fromAgentDid,
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+      multi_agent_session_id: input.multiAgentSessionId,
+      run_id: input.runId,
+      task_queue: input.taskQueue ?? COPILOTKIT_TASK_QUEUE,
+      workflow_id: input.workflowId,
+      workflow_type: input.workflowType ?? COPILOTKIT_WORKFLOW_TYPE
+    });
+
+    const emissionMeta = {
+      activityId: undefined,
+      eventType: WorkflowEventType.HANDOFF,
+      workflowId: input.workflowId
+    };
+
+    if (!client) {
+      this.#notifyObserver(payload, emissionMeta);
+      return null;
+    }
+
+    return this.#evaluateWith(client, payload, emissionMeta);
+  }
+
   async #evaluate(
+    payload: Record<string, unknown>,
+    emissionMeta: Pick<OpenBoxEmission, "activityId" | "eventType" | "workflowId">
+  ): Promise<GovernanceVerdictResponse | null> {
+    return this.#evaluateWith(this.#client, payload, emissionMeta);
+  }
+
+  async #evaluateWith(
+    client: OpenBoxClient,
     payload: Record<string, unknown>,
     emissionMeta: Pick<OpenBoxEmission, "activityId" | "eventType" | "workflowId">
   ): Promise<GovernanceVerdictResponse | null> {
     this.#notifyObserver(payload, emissionMeta);
 
     try {
-      return await this.#client.evaluate(payload);
+      return await client.evaluate(payload);
     } catch (err) {
       this.#logger.warn?.({
         err,
@@ -335,6 +427,21 @@ function withBaseEnvelope(
     task_queue: COPILOTKIT_TASK_QUEUE,
     timestamp: new Date().toISOString(),
     ...payload
+  };
+}
+
+/**
+ * Project the optional multi-agent fields onto a payload. Both keys are
+ * omitted when unset, keeping single-agent payloads byte-identical to before.
+ */
+function multiAgentFields(input: MultiAgentEventFields): Record<string, unknown> {
+  return {
+    ...(input.multiAgentSessionId
+      ? { multi_agent_session_id: input.multiAgentSessionId }
+      : {}),
+    ...(input.parentWorkflowId
+      ? { parent_workflow_id: input.parentWorkflowId }
+      : {})
   };
 }
 

@@ -7,9 +7,14 @@ export type {
 } from "./with-openbox-runtime.js";
 
 export type {
+  MultiAgentSessionContext,
   OpenBoxEmission,
   OpenBoxLogger,
   OpenBoxMiddlewareOptions,
+  OpenBoxMultiAgentContext,
+  OpenBoxMultiAgentOptions,
+  OpenBoxObservedToolCall,
   OpenBoxRuntimeController,
-  OpenBoxRuntimeDefaults
+  OpenBoxRuntimeDefaults,
+  OpenBoxSubagentHandoffConfig
 } from "./types.js";

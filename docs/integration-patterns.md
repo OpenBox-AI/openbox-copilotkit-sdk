@@ -156,8 +156,106 @@ If any of those guarantees matter to you, use Pattern 1.
 | Custom `CopilotRuntimeOptions` builder you don't want OpenBox to wrap | **Pattern 2** |
 | Embedded in another framework that already constructs `CopilotRuntime` | **Pattern 2** |
 
+## Multi-agent delegation (Handoff)
+
+By default a CopilotKit run is one OpenBox session. When CopilotKit delegates to a
+subagent (e.g. a Mastra weather agent), opt into **multi-agent mode** to group the
+parent run and the child run under one `multi_agent_session_id` and record a
+parent → child `Handoff` edge. Disabled by default — single-agent governance is
+unchanged unless you set `multiAgent.enabled`.
+
+### Identity model (read this first)
+
+The orchestrator and each subagent must be **distinct OpenBox agents**, each with
+its own API key + DID:
+
+| Role | OpenBox agent | Auth for normal events | Role in Handoff |
+|---|---|---|---|
+| Parent / orchestrator | e.g. `copilotkit-gateway` | CopilotKit API key + DID | `from_agent_did` |
+| Child / subagent | e.g. `mastra-weather-agent` | Mastra API key + DID | authenticated emitter → `to_agent` |
+
+OpenBox Core derives the handoff's `to_agent` from the **authenticated emitter** of
+the Handoff request — the wire never carries `to_agent_did`. So the Handoff must be
+sent as the child. If both runtimes share one identity, the handoff becomes
+self-to-self.
+
+### Configure (Pattern 1)
+
+```ts
+const { runtime, shutdown } = await withOpenBoxRuntime(
+  { agents },
+  {
+    // Parent CopilotKit identity (becomes from_agent_did).
+    agentDid: process.env.OPENBOX_COPILOTKIT_AGENT_DID,
+    agentPrivateKey: process.env.OPENBOX_COPILOTKIT_AGENT_PRIVATE_KEY,
+    middlewareOptions: {
+      multiAgent: {
+        enabled: true,
+        // Optional — defaults to the runtime agentDid above.
+        // parentAgentDid: process.env.OPENBOX_COPILOTKIT_AGENT_DID,
+        // Optional — defaults to `mas:${runId}`.
+        // multiAgentSessionId: (ctx) => `mas:${ctx.runId}`,
+        handoffTools: {
+          // Map a delegate tool name to the subagent it invokes.
+          weatherTool: {
+            childAgentName: "mastra-weather-agent",
+            childWorkflowType: "weather-agent",
+            childTaskQueue: "mastra",
+            // Child credentials enable PARENT-SIDE Handoff emission (below).
+            childApiKey: process.env.OPENBOX_MASTRA_API_KEY,
+            childAgentDid: process.env.OPENBOX_MASTRA_AGENT_DID,
+            childAgentPrivateKey: process.env.OPENBOX_MASTRA_AGENT_PRIVATE_KEY,
+          },
+        },
+        // Or resolve dynamically instead of a static map:
+        // resolveHandoff: (call, ctx) => call.name === "weatherTool" ? {...} : null,
+      },
+    },
+  }
+);
+```
+
+### Two emission modes
+
+- **Parent-side (child credentials configured):** the SDK signs the `Handoff`
+  request with the child's identity (via a child-scoped client) so Core resolves
+  `to_agent` correctly. Self-contained — the demo works from CopilotKit alone.
+- **Context-export (no child credentials):** the SDK does **not** send the Handoff
+  (it would mis-resolve under the parent identity). Instead it surfaces an
+  `OpenBoxMultiAgentContext` on the `onEvent` hook (embedded in the Handoff
+  payload's `metadata.openbox_multi_agent_context`). A remote child runtime reads
+  that context and emits the `Handoff` itself.
+
+### Completing the group on the child side
+
+`multi_agent_session_id` grouping requires **both** sessions to carry the same id.
+This SDK stamps it on the CopilotKit (parent) stream. The child runtime must also:
+
+1. emit `Handoff` (if not emitted parent-side),
+2. stamp the same `multi_agent_session_id` on its `WorkflowStarted` + lifecycle events,
+3. stamp `parent_workflow_id` (from the propagated context) on its workflow events.
+
+For a Mastra child, that is the Mastra SDK's responsibility. Until the child
+propagates the context, you get the parent session grouped + a Handoff edge, but the
+child session will not join the group — see
+[troubleshooting → independent streams](./troubleshooting.md#10-copilotkit-and-mastra-show-as-two-separate-runs-not-one-multi-agent-run).
+
+### Expected event order (prompt: "what is the weather in tokyo?")
+
+```text
+parent  WorkflowStarted          multi_agent_session_id
+parent  SignalReceived:user_input
+parent  ActivityStarted:weatherTool
+child   Handoff                  multi_agent_session_id, from_agent_did = parent
+child   WorkflowStarted          multi_agent_session_id, parent_workflow_id
+child   ActivityStarted/Completed:getWeather
+child   WorkflowCompleted        multi_agent_session_id, parent_workflow_id
+parent  ActivityCompleted:weatherTool
+parent  WorkflowCompleted        multi_agent_session_id
+```
+
 ## See also
 
 - [API reference](./api-reference.md) — full signatures.
 - [Installation](./installation.md) — `next.config.ts` and `.env`.
-- [Troubleshooting](./troubleshooting.md) — the eight scenarios.
+- [Troubleshooting](./troubleshooting.md) — common scenarios.

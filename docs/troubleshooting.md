@@ -261,6 +261,44 @@ This removes the transitive `withOpenBox(...)` install from the Next process. **
 
 ---
 
+## 10. CopilotKit and Mastra show as two separate runs, not one multi-agent run
+
+**Symptom**
+
+You co-run this SDK and `openbox-mastra-sdk` and expected one grouped multi-agent
+run with a parent → child handoff edge. Instead you see two independent sessions and
+no handoff — even though both streams share the same `run_id`.
+
+**Diagnosis**
+
+Multi-agent grouping is **opt-in** and is driven by `sessions.multi_agent_session_id`,
+**not** by a shared `run_id`. Simply co-running two SDKs (scenario 8) never groups
+them. To appear as one run you need all three:
+
+1. `middlewareOptions.multiAgent.enabled: true` on this SDK — stamps
+   `multi_agent_session_id` on the CopilotKit (parent) stream.
+2. A `Handoff` event with `from_agent_did` = parent DID, sent **authenticated as the
+   child** (parent-side with child credentials, or child-side from the propagated
+   context). Without a Handoff, Core never writes a `session_handoffs` row, so no
+   parent → child edge is inferred.
+3. The **child runtime** stamping the *same* `multi_agent_session_id` (and
+   `parent_workflow_id`) on its own events.
+
+If only step 1 is done, the parent session is grouped and a Handoff edge may exist,
+but the child session won't join the group until the child SDK propagates the
+context.
+
+**Fix**
+
+Enable and configure multi-agent mode per
+[Multi-agent delegation (Handoff)](./integration-patterns.md#multi-agent-delegation-handoff):
+register **distinct** parent and child OpenBox agents (separate API keys + DIDs), map
+the delegate tool in `handoffTools`, and make the child runtime carry the same
+`multi_agent_session_id`. Reusing one identity for both runtimes produces a
+self-to-self handoff — register two agents.
+
+---
+
 ## Still stuck?
 
 - Re-check [installation](./installation.md) for the required Node version and `next.config.ts` entry.

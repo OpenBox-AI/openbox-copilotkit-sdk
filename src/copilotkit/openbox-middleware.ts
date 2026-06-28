@@ -7,7 +7,9 @@ import {
 } from "@ag-ui/client";
 import { Observable } from "rxjs";
 
+import { OpenBoxClient } from "../client/openbox-client.js";
 import { getOpenBoxExecutionContext } from "../governance/context.js";
+import { OpenBoxConfigError } from "../types/errors.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { Verdict } from "../types/verdict.js";
 
@@ -17,12 +19,19 @@ import {
 } from "./governance-blocked-error.js";
 import {
   AGENT_OUTPUT_SIGNAL_NAME,
+  COPILOTKIT_TASK_QUEUE,
+  COPILOTKIT_WORKFLOW_TYPE,
   OpenBoxCopilotKitEmitter,
   USER_INPUT_SIGNAL_NAME
 } from "./openbox-emitter.js";
 import type {
+  MultiAgentSessionContext,
   OpenBoxMiddlewareOptions,
-  OpenBoxRuntimeController
+  OpenBoxMultiAgentContext,
+  OpenBoxMultiAgentOptions,
+  OpenBoxObservedToolCall,
+  OpenBoxRuntimeController,
+  OpenBoxSubagentHandoffConfig
 } from "./types.js";
 
 const TOOL_ORIGIN = "copilotkit-observed";
@@ -49,6 +58,12 @@ interface ToolCallBufferEntry {
 }
 
 interface PerRunState {
+  // Dedup keys for already-emitted handoffs:
+  // `${multiAgentSessionId}::${fromAgentDid}::${childAgentName}::${parentActivityId}`.
+  emittedHandoffs: Set<string>;
+  // Resolved once per run when multi-agent mode is enabled; undefined disables
+  // every multi-agent emission for this run.
+  multiAgentSessionId: string | undefined;
   outputBuffers: Map<string, string>;
   outputText: string;
   runId: string;
@@ -73,6 +88,10 @@ interface PerRunState {
  * runtimes cannot be inferred from observed `TOOL_CALL_*` alone).
  */
 export class OpenBoxMiddleware extends Middleware {
+  // Lazily-built OpenBoxClients scoped to each child agent's identity, keyed by
+  // child DID. Reused across delegations within this middleware instance so the
+  // Ed25519 seed is parsed once per child.
+  readonly #childClientCache = new Map<string, OpenBoxClient>();
   readonly #emitter: OpenBoxCopilotKitEmitter;
   readonly #enforceApprovals: boolean;
   readonly #frontendToolNames: string[] | undefined;
@@ -80,6 +99,9 @@ export class OpenBoxMiddleware extends Middleware {
     | ((call: { name: string }) => boolean)
     | undefined;
   readonly #logger: OpenBoxRuntimeController["logger"];
+  readonly #multiAgent: OpenBoxMultiAgentOptions | undefined;
+  readonly #multiAgentEnabled: boolean;
+  readonly #parentAgentDid: string | undefined;
   readonly #runtime: OpenBoxRuntimeController;
 
   public constructor(
@@ -93,6 +115,20 @@ export class OpenBoxMiddleware extends Middleware {
     this.#enforceApprovals = opts.enforceApprovals === true;
     this.#frontendToolNames = opts.frontendToolNames;
     this.#isFrontendTool = opts.isFrontendTool;
+
+    this.#multiAgent = opts.multiAgent;
+    this.#multiAgentEnabled = opts.multiAgent?.enabled === true;
+    this.#parentAgentDid =
+      opts.multiAgent?.parentAgentDid ?? runtime.client.agentDid;
+
+    // Fail fast: multi-agent mode needs a parent DID to populate
+    // `from_agent_did` on the Handoff. Without it Core would reject the marker.
+    if (this.#multiAgentEnabled && !this.#parentAgentDid) {
+      throw new OpenBoxConfigError(
+        "OpenBox multi-agent mode is enabled but no parent agent DID is available. " +
+          "Set middlewareOptions.multiAgent.parentAgentDid or configure the runtime agentDid/agentPrivateKey."
+      );
+    }
   }
 
   public override run(
@@ -108,6 +144,11 @@ export class OpenBoxMiddleware extends Middleware {
   ): Observable<BaseEvent> {
     return new Observable<BaseEvent>(subscriber => {
       const state: PerRunState = {
+        emittedHandoffs: new Set(),
+        multiAgentSessionId: this.#resolveMultiAgentSessionId(
+          input.runId,
+          input.threadId
+        ),
         outputBuffers: new Map(),
         outputText: "",
         runId: input.runId,
@@ -237,6 +278,7 @@ export class OpenBoxMiddleware extends Middleware {
             agentId,
             goal,
             metadata,
+            multiAgentSessionId: state.multiAgentSessionId,
             runId: state.runId,
             threadId: state.workflowId,
             userInput: state.userInput,
@@ -245,6 +287,7 @@ export class OpenBoxMiddleware extends Middleware {
           await this.#emitter.emitSignalReceived({
             goal,
             metadata,
+            multiAgentSessionId: state.multiAgentSessionId,
             payload: state.userInput,
             runId: state.runId,
             signalName: USER_INPUT_SIGNAL_NAME,
@@ -350,6 +393,7 @@ export class OpenBoxMiddleware extends Middleware {
         await this.#emitter.emitSignalReceived({
           goal,
           metadata,
+          multiAgentSessionId: state.multiAgentSessionId,
           payload: state.outputText,
           runId: state.runId,
           signalName: AGENT_OUTPUT_SIGNAL_NAME,
@@ -361,6 +405,7 @@ export class OpenBoxMiddleware extends Middleware {
           endTime,
           goal,
           metadata,
+          multiAgentSessionId: state.multiAgentSessionId,
           runId: state.runId,
           startTime: state.startTime,
           workflowId: state.workflowId
@@ -380,6 +425,7 @@ export class OpenBoxMiddleware extends Middleware {
           },
           goal,
           metadata,
+          multiAgentSessionId: state.multiAgentSessionId,
           runId: state.runId,
           workflowId: state.workflowId
         });
@@ -454,6 +500,7 @@ export class OpenBoxMiddleware extends Middleware {
       frontend: entry.frontend,
       goal,
       metadata,
+      multiAgentSessionId: state.multiAgentSessionId,
       runId: state.runId,
       toolName: entry.toolName,
       toolOrigin: TOOL_ORIGIN,
@@ -463,6 +510,10 @@ export class OpenBoxMiddleware extends Middleware {
     if (this.#enforceApprovals && shouldBlock(verdict)) {
       return createGovernanceBlockedErrorEvent(resolveCorrelationId(verdict));
     }
+    // A blocked delegation never hands off; the Handoff is emitted only after a
+    // non-blocking parent ActivityStarted, mirroring the expected sequence
+    // (parent ActivityStarted → child Handoff → child WorkflowStarted).
+    await this.#maybeEmitHandoff({ activityId, entry, state });
     return undefined;
   }
 
@@ -495,6 +546,7 @@ export class OpenBoxMiddleware extends Middleware {
       endTime,
       goal,
       metadata,
+      multiAgentSessionId: state.multiAgentSessionId,
       runId: state.runId,
       startTime: entry.startTime,
       status,
@@ -516,6 +568,7 @@ export class OpenBoxMiddleware extends Middleware {
       },
       goal: context?.goal,
       metadata: context?.metadata,
+      multiAgentSessionId: state.multiAgentSessionId,
       runId: state.runId,
       workflowId: state.workflowId
     });
@@ -529,6 +582,177 @@ export class OpenBoxMiddleware extends Middleware {
       return true;
     }
     return false;
+  }
+
+  #resolveMultiAgentSessionId(
+    runId: string,
+    workflowId: string
+  ): string | undefined {
+    if (!this.#multiAgentEnabled) {
+      return undefined;
+    }
+    const configured = this.#multiAgent?.multiAgentSessionId;
+    if (typeof configured === "function") {
+      return configured(this.#sessionContext(runId, workflowId));
+    }
+    if (typeof configured === "string" && configured.length > 0) {
+      return configured;
+    }
+    // Prefixed default so the value is not mistaken for a Temporal run id.
+    return `mas:${runId}`;
+  }
+
+  #sessionContext(
+    runId: string,
+    workflowId: string
+  ): MultiAgentSessionContext {
+    return {
+      parentAgentDid: this.#parentAgentDid ?? "",
+      runId,
+      threadId: workflowId,
+      workflowId
+    };
+  }
+
+  #resolveHandoffConfig(
+    call: OpenBoxObservedToolCall,
+    state: PerRunState
+  ): OpenBoxSubagentHandoffConfig | undefined {
+    const ctx = this.#sessionContext(state.runId, state.workflowId);
+    const dynamic = this.#multiAgent?.resolveHandoff?.(call, ctx);
+    if (dynamic) {
+      return dynamic;
+    }
+    return this.#multiAgent?.handoffTools?.[call.name];
+  }
+
+  /**
+   * If the just-started activity maps to a configured subagent, emit exactly
+   * one `Handoff` per delegation. Sent as the child agent (so Core resolves
+   * `to_agent` correctly) when child credentials are configured; otherwise the
+   * prepared `OpenBoxMultiAgentContext` is surfaced via `onEvent` for a remote
+   * child to emit. Fully isolated from the event pipeline — never throws.
+   */
+  async #maybeEmitHandoff({
+    activityId,
+    entry,
+    state
+  }: {
+    activityId: string;
+    entry: ToolCallBufferEntry;
+    state: PerRunState;
+  }): Promise<void> {
+    try {
+      if (!this.#multiAgentEnabled || !state.multiAgentSessionId) {
+        return;
+      }
+      const parentAgentDid = this.#parentAgentDid;
+      if (!parentAgentDid) {
+        return;
+      }
+
+      const config = this.#resolveHandoffConfig(
+        { args: entry.activityArgs, name: entry.toolName, toolCallId: activityId },
+        state
+      );
+      if (!config) {
+        return;
+      }
+
+      const childAgentName = config.childAgentName ?? entry.toolName;
+      const dedupeKey = `${state.multiAgentSessionId}::${parentAgentDid}::${childAgentName}::${activityId}`;
+      if (state.emittedHandoffs.has(dedupeKey)) {
+        return;
+      }
+      state.emittedHandoffs.add(dedupeKey);
+
+      const multiAgentContext: OpenBoxMultiAgentContext = {
+        multiAgentSessionId: state.multiAgentSessionId,
+        parentActivityId: activityId,
+        parentAgentDid,
+        parentRunId: state.runId,
+        parentWorkflowId: state.workflowId
+      };
+
+      const handoffMetadata: Record<string, unknown> = {
+        child_agent_name: childAgentName,
+        ...(config.childTaskQueue
+          ? { child_task_queue: config.childTaskQueue }
+          : {}),
+        ...(config.childWorkflowType
+          ? { child_workflow_type: config.childWorkflowType }
+          : {}),
+        delegate_tool_name: entry.toolName,
+        openbox_multi_agent_context: multiAgentContext,
+        parent_activity_id: activityId,
+        parent_workflow_id: state.workflowId
+      };
+
+      const childClient = this.#buildChildClient(config);
+      if (!childClient) {
+        this.#logger.debug?.({
+          multi_agent_session_id: state.multiAgentSessionId,
+          note: "openbox multi-agent: handoff context prepared without child credentials — a remote child runtime must emit the Handoff",
+          workflow_id: state.workflowId
+        });
+      }
+
+      await this.#emitter.emitHandoff(
+        {
+          fromAgentDid: parentAgentDid,
+          metadata: handoffMetadata,
+          multiAgentSessionId: state.multiAgentSessionId,
+          runId: state.runId,
+          taskQueue: COPILOTKIT_TASK_QUEUE,
+          workflowId: state.workflowId,
+          workflowType: COPILOTKIT_WORKFLOW_TYPE
+        },
+        childClient
+      );
+    } catch (err) {
+      this.#logger.warn?.({
+        err,
+        note: "openbox multi-agent: handoff emission failed — swallowed",
+        workflow_id: state.workflowId
+      });
+    }
+  }
+
+  #buildChildClient(
+    config: OpenBoxSubagentHandoffConfig
+  ): OpenBoxClient | undefined {
+    const { childAgentDid, childAgentPrivateKey, childApiKey } = config;
+    if (!childApiKey || !childAgentDid || !childAgentPrivateKey) {
+      return undefined;
+    }
+
+    const cached = this.#childClientCache.get(childAgentDid);
+    if (cached) {
+      return cached;
+    }
+
+    try {
+      const parent = this.#runtime.client;
+      const childClient = new OpenBoxClient({
+        agentDid: childAgentDid,
+        agentPrivateKey: childAgentPrivateKey,
+        apiKey: childApiKey,
+        apiUrl: parent.apiUrl,
+        evaluateMaxRetries: parent.evaluateMaxRetries,
+        evaluateRetryBaseDelayMs: parent.evaluateRetryBaseDelayMs,
+        onApiError: parent.onApiError,
+        timeoutSeconds: parent.timeoutSeconds
+      });
+      this.#childClientCache.set(childAgentDid, childClient);
+      return childClient;
+    } catch (err) {
+      // Bad child DID/key must not crash the run — degrade to context-export.
+      this.#logger.warn?.({
+        err,
+        note: "openbox multi-agent: failed to build child-scoped client (check child DID / private key) — falling back to context-export only"
+      });
+      return undefined;
+    }
   }
 }
 
