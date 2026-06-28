@@ -26,6 +26,7 @@ import type {
 } from "./types.js";
 
 const TOOL_ORIGIN = "copilotkit-observed";
+const TOOL_CALL_RESULT_EVENT_TYPE = "TOOL_CALL_RESULT";
 
 /**
  * Extract `EventWithState` from `Middleware.runNextWithState` return type so
@@ -37,7 +38,11 @@ type EventWithState = ExtractObservableType<
 >;
 
 interface ToolCallBufferEntry {
+  activityArgs?: unknown;
+  activityStarted: boolean;
   args: string;
+  completed: boolean;
+  endTime?: number;
   frontend: boolean;
   startTime: number;
   toolName: string;
@@ -59,7 +64,7 @@ interface PerRunState {
  * and emits OpenBox governance events via `OpenBoxCopilotKitEmitter`.
  *
  * Default is telemetry-only. `opts.enforceApprovals: true` opts in to await
- * `client.evaluate` + `client.pollApproval` before each tool call; on a
+ * `client.evaluate` + `client.pollApproval` once tool args are complete; on a
  * block/halt verdict the middleware injects a redacted `governance_blocked`
  * error frame (via `governance-blocked-error.ts`) into the observable.
  *
@@ -187,6 +192,43 @@ export class OpenBoxMiddleware extends Middleware {
     const agentId = context?.agentId ?? this.#runtime.defaults.agentId;
     const metadata = context?.metadata;
 
+    if (isToolCallResultEvent(event)) {
+      const resultEvent = event as BaseEvent & {
+        toolCallId?: string | undefined;
+      };
+      if (!resultEvent.toolCallId) {
+        return undefined;
+      }
+      const entry = state.toolCallBuffer.get(resultEvent.toolCallId);
+      if (!entry) {
+        return undefined;
+      }
+      entry.activityArgs ??= parseToolArgs(entry.args);
+      entry.endTime = Date.now();
+      const blockResult = await this.#emitActivityStartedIfNeeded({
+        activityId: resultEvent.toolCallId,
+        agentId,
+        entry,
+        goal,
+        metadata,
+        state
+      });
+      if (blockResult) {
+        return blockResult;
+      }
+      await this.#emitActivityCompleted({
+        activityId: resultEvent.toolCallId,
+        activityOutput: extractToolResultOutput(resultEvent),
+        entry,
+        goal,
+        metadata,
+        state,
+        status: "completed"
+      });
+      state.toolCallBuffer.delete(resultEvent.toolCallId);
+      return undefined;
+    }
+
     switch (event.type) {
       case EventType.RUN_STARTED: {
         if (!state.workflowStarted) {
@@ -219,29 +261,13 @@ export class OpenBoxMiddleware extends Middleware {
         };
         const frontend = this.#isFrontend({ name: toolCall.toolCallName });
         state.toolCallBuffer.set(toolCall.toolCallId, {
+          activityStarted: false,
           args: "",
+          completed: false,
           frontend,
           startTime: Date.now(),
           toolName: toolCall.toolCallName
         });
-
-        const verdict = await this.#emitter.emitActivityStarted({
-          activityId: toolCall.toolCallId,
-          agentId,
-          frontend,
-          goal,
-          metadata,
-          runId: state.runId,
-          toolName: toolCall.toolCallName,
-          toolOrigin: TOOL_ORIGIN,
-          workflowId: state.workflowId
-        });
-
-        if (this.#enforceApprovals && shouldBlock(verdict)) {
-          return createGovernanceBlockedErrorEvent(
-            resolveCorrelationId(verdict)
-          );
-        }
         return undefined;
       }
 
@@ -263,21 +289,19 @@ export class OpenBoxMiddleware extends Middleware {
         if (!entry) {
           return undefined;
         }
-        state.toolCallBuffer.delete(endEvent.toolCallId);
-        const endTime = Date.now();
-        await this.#emitter.emitActivityCompleted({
-          activityArgs: parseToolArgs(entry.args),
+        entry.activityArgs = parseToolArgs(entry.args);
+        entry.endTime = Date.now();
+        const blockResult = await this.#emitActivityStartedIfNeeded({
           activityId: endEvent.toolCallId,
-          durationMs: Math.max(0, endTime - entry.startTime),
-          endTime,
+          agentId,
+          entry,
           goal,
           metadata,
-          runId: state.runId,
-          startTime: entry.startTime,
-          status: "completed",
-          toolName: entry.toolName,
-          workflowId: state.workflowId
+          state
         });
+        if (blockResult) {
+          return blockResult;
+        }
         return undefined;
       }
 
@@ -314,6 +338,15 @@ export class OpenBoxMiddleware extends Middleware {
 
       case EventType.RUN_FINISHED: {
         const endTime = Date.now();
+        const blockResult = await this.#flushPendingToolCalls({
+          agentId,
+          goal,
+          metadata,
+          state
+        });
+        if (blockResult) {
+          return blockResult;
+        }
         await this.#emitter.emitSignalReceived({
           goal,
           metadata,
@@ -356,6 +389,119 @@ export class OpenBoxMiddleware extends Middleware {
       default:
         return undefined;
     }
+  }
+
+  async #flushPendingToolCalls({
+    agentId,
+    goal,
+    metadata,
+    state
+  }: {
+    agentId?: string | undefined;
+    goal?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+    state: PerRunState;
+  }): Promise<GovernanceBlockedErrorEvent | undefined> {
+    for (const [activityId, entry] of state.toolCallBuffer) {
+      entry.activityArgs ??= parseToolArgs(entry.args);
+      entry.endTime ??= Date.now();
+      const blockResult = await this.#emitActivityStartedIfNeeded({
+        activityId,
+        agentId,
+        entry,
+        goal,
+        metadata,
+        state
+      });
+      if (blockResult) {
+        return blockResult;
+      }
+      await this.#emitActivityCompleted({
+        activityId,
+        entry,
+        goal,
+        metadata,
+        state,
+        status: "completed"
+      });
+      state.toolCallBuffer.delete(activityId);
+    }
+    return undefined;
+  }
+
+  async #emitActivityStartedIfNeeded({
+    activityId,
+    agentId,
+    entry,
+    goal,
+    metadata,
+    state
+  }: {
+    activityId: string;
+    agentId?: string | undefined;
+    entry: ToolCallBufferEntry;
+    goal?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+    state: PerRunState;
+  }): Promise<GovernanceBlockedErrorEvent | undefined> {
+    if (entry.activityStarted) {
+      return undefined;
+    }
+    const verdict = await this.#emitter.emitActivityStarted({
+      activityArgs: entry.activityArgs,
+      activityId,
+      agentId,
+      frontend: entry.frontend,
+      goal,
+      metadata,
+      runId: state.runId,
+      toolName: entry.toolName,
+      toolOrigin: TOOL_ORIGIN,
+      workflowId: state.workflowId
+    });
+    entry.activityStarted = true;
+    if (this.#enforceApprovals && shouldBlock(verdict)) {
+      return createGovernanceBlockedErrorEvent(resolveCorrelationId(verdict));
+    }
+    return undefined;
+  }
+
+  async #emitActivityCompleted({
+    activityId,
+    activityOutput,
+    entry,
+    goal,
+    metadata,
+    state,
+    status
+  }: {
+    activityId: string;
+    activityOutput?: unknown;
+    entry: ToolCallBufferEntry;
+    goal?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+    state: PerRunState;
+    status: "completed" | "failed" | "aborted";
+  }): Promise<void> {
+    if (entry.completed) {
+      return;
+    }
+    const endTime = entry.endTime ?? Date.now();
+    await this.#emitter.emitActivityCompleted({
+      activityArgs: entry.activityArgs,
+      activityId,
+      ...(activityOutput !== undefined ? { activityOutput } : {}),
+      durationMs: Math.max(0, endTime - entry.startTime),
+      endTime,
+      goal,
+      metadata,
+      runId: state.runId,
+      startTime: entry.startTime,
+      status,
+      toolName: entry.toolName,
+      workflowId: state.workflowId
+    });
+    entry.completed = true;
   }
 
   async #emitWorkflowFailedFromError(
@@ -425,6 +571,35 @@ function parseToolArgs(raw: string): unknown {
     return JSON.parse(raw) as unknown;
   } catch {
     return raw;
+  }
+}
+
+function isToolCallResultEvent(event: BaseEvent): boolean {
+  return String(event.type) === TOOL_CALL_RESULT_EVENT_TYPE;
+}
+
+function extractToolResultOutput(event: BaseEvent): unknown {
+  const record = event as unknown as Record<string, unknown>;
+  for (const key of ["result", "output", "content", "value", "data"]) {
+    if (Object.prototype.hasOwnProperty.call(record, key)) {
+      return parseMaybeJsonString(record[key]);
+    }
+  }
+  return undefined;
+}
+
+function parseMaybeJsonString(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return value;
+  }
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return value;
   }
 }
 

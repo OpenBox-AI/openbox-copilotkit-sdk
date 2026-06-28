@@ -71,6 +71,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
     const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
 
     await emitter.emitActivityStarted({
+      activityArgs: { color: "blue" },
       activityId: "call-77",
       frontend: true,
       runId: "run-C",
@@ -83,6 +84,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
     assertCanonicalEnvelope(payload);
     expect(payload.event_type).toBe(WorkflowEventType.ACTIVITY_STARTED);
     expect(payload.activity_id).toBe("call-77");
+    expect(payload.activity_input).toEqual({ color: "blue" });
     expect(payload.activity_type).toBe("setThemeColor");
     expect(payload.tool_origin).toBe("copilotkit-observed");
     expect(payload.frontend).toBe(true);

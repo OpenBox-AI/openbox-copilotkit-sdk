@@ -80,7 +80,7 @@ interface OpenBoxMiddlewareOptions {
 **Parameters**
 
 - `runtime` — an `OpenBoxRuntimeController` (`{ client, defaults, logger, spanProcessor }`). Pattern 1 builds this for you; Pattern 2 builds it by hand.
-- `opts.enforceApprovals` — default `false` (telemetry-only). When `true`, the middleware awaits `client.evaluate` + `client.pollApproval` before every `TOOL_CALL_START`. A block/halt verdict halts the stream and emits a redacted `governance_blocked` envelope (see below).
+- `opts.enforceApprovals` — default `false` (telemetry-only). When `true`, the middleware awaits `client.evaluate` + `client.pollApproval` once a tool call's args are complete, before emitting the OpenBox `ActivityStarted` record. A block/halt verdict halts the stream and emits a redacted `governance_blocked` envelope (see below).
 - `opts.frontendToolNames` — explicit allowlist of tool names that should record `frontend: true`. Without this (or `isFrontendTool`), every observed tool call records `frontend: false`, `tool_origin: "copilotkit-observed"` — safe default for non-Mastra backends (LangGraph / CrewAI / BuiltIn).
 - `opts.isFrontendTool` — alternative callback form. Wins over `frontendToolNames` if both are set.
 - `opts.onEvent` — fired for every emission with `{ activityId?, eventType, payload, workflowId }`. Optional sink for sidecar telemetry pipelines.
@@ -90,11 +90,12 @@ interface OpenBoxMiddlewareOptions {
 | AG-UI event | OpenBox emission |
 |---|---|
 | `RUN_STARTED` | `WorkflowStarted` + `SignalReceived(user_input)` |
-| `TOOL_CALL_START` | `ActivityStarted` (under `enforceApprovals: true`, awaits `client.evaluate` + `client.pollApproval`) |
-| `TOOL_CALL_ARGS` | buffered (delta accumulated for `ActivityCompleted.activityArgs`) |
-| `TOOL_CALL_END` | `ActivityCompleted` (`status: "completed"`) |
+| `TOOL_CALL_START` | starts an in-memory tool-call buffer |
+| `TOOL_CALL_ARGS` | buffered (delta accumulated for `ActivityStarted.activity_input` and `ActivityCompleted.activity_input`) |
+| `TOOL_CALL_END` | emits `ActivityStarted` with parsed `activity_input`; completion remains pending for a result event |
+| `TOOL_CALL_RESULT` | emits `ActivityCompleted` with `activity_output` when the stream exposes a tool result |
 | `TEXT_MESSAGE_START` / `_CONTENT` / `_END` | buffered into `state.outputText` |
-| `RUN_FINISHED` | `SignalReceived(agent_output)` + `WorkflowCompleted` |
+| `RUN_FINISHED` | flushes any pending tool completions, then emits `SignalReceived(agent_output)` + `WorkflowCompleted` |
 | `RUN_ERROR` | `WorkflowFailed` |
 | upstream observable error | `WorkflowFailed` then `subscriber.error(err)` |
 

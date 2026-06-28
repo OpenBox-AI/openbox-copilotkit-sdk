@@ -99,16 +99,16 @@ You set `enforceApprovals: true`, but tool outputs that should be blocked still 
 
 **Diagnosis**
 
-T0 enforces **before each `TOOL_CALL_START`** — inside `createOpenBoxMiddleware`, the verdict is awaited before the event reaches the AG-UI observable. A block/halt verdict halts the stream and emits the redacted `governance_blocked` envelope.
+T0 enforces once a tool call's args are complete — inside `createOpenBoxMiddleware`, the verdict is awaited before the OpenBox `ActivityStarted` record is emitted. A block/halt verdict halts the stream and emits the redacted `governance_blocked` envelope.
 
 T0 does **not** enforce in `afterRequest`. CopilotKit runtime v2's `fetch-handler.ts` runs `callAfterRequestMiddleware` fire-and-forget AFTER the SSE response has flushed. By the time `afterRequest` runs, the bytes are already on the wire — no amount of throwing from inside it produces a 5xx.
 
 **Fix**
 
-If you need output-side enforcement, the policy must look at the **tool input** (before `TOOL_CALL_START`), not the tool output. The accepted T0 shape:
+If you need output-side enforcement, the policy must look at the **tool input** once args are complete, not the tool output. The accepted T0 shape:
 
-- `enforceApprovals: true` blocks the tool call's input.
-- Tool output observability happens via `ActivityCompleted` emissions: subscribe via `middlewareOptions.onEvent` for adopter-side handling, or read the workflow buffer from the OpenBox dashboard. The `OpenBoxSpanProcessor` buffer itself is internal — it ships to OpenBox Core; T0 has no public adopter-side buffer-inspection hook.
+- `enforceApprovals: true` blocks after the full tool-call input is known.
+- Tool output observability happens via `ActivityCompleted.activity_output` when the AG-UI stream exposes `TOOL_CALL_RESULT`. The final assistant message still emits separately as `SignalReceived(agent_output)`.
 
 Output-side enforcement is a T1 design item; tracked in the project plan under the per-verdict matrix work.
 

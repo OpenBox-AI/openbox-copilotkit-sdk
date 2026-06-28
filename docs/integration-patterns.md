@@ -24,7 +24,7 @@ const { runtime, shutdown } = await withOpenBoxRuntime(
       // frontend: true and tool_origin: "copilotkit-observed" in OpenBox.
       frontendToolNames: ["setThemeColor"],
       // Telemetry-default is false. Flip to true to await client.evaluate +
-      // client.pollApproval before each TOOL_CALL_START — block/halt
+      // client.pollApproval once tool-call args are complete — block/halt
       // verdicts emit the redacted governance_blocked envelope into SSE.
       enforceApprovals: false,
     },
