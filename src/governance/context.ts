@@ -57,6 +57,33 @@ export async function runWithOpenBoxExecutionContext<T>(
   return executionContextStore.run(nextContext, callback);
 }
 
+// Enters the OpenBox execution context for the remainder of the current async
+// task without wrapping a callback. Required by the CopilotKit
+// before-request middleware path: the v2 `BeforeRequestMiddlewareFn` returns a
+// (possibly modified) `Request` and then v2's fetch-handler continues the
+// request handling synchronously after the await — there is no callback to
+// `runWithOpenBoxExecutionContext` over.
+//
+// Node-only: depends on `AsyncLocalStorage.enterWith`, which is available on
+// Node.js but not on `workerd`/edge runtimes. The CopilotKit SDK is server-only
+// (engines.node >=24.10.0 + `serverExternalPackages`), so this is intentional.
+export function enterOpenBoxExecutionContext(
+  context: OpenBoxExecutionContext
+): void {
+  const activeContext = executionContextStore.getStore();
+  const nextContext: OpenBoxExecutionContext = {
+    ...(activeContext ?? {}),
+    ...context
+  };
+
+  nextContext.metadata = mergeOpenBoxEventMetadata(
+    activeContext?.metadata,
+    context.metadata
+  );
+
+  executionContextStore.enterWith(nextContext);
+}
+
 function mergeMetadataObjects(
   base: OpenBoxEventMetadata,
   override: OpenBoxEventMetadata
