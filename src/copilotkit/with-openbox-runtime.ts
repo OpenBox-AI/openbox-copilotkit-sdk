@@ -1,0 +1,116 @@
+import {
+  CopilotRuntime,
+  type CopilotRuntimeOptions
+} from "@copilotkit/runtime/v2";
+
+import { type OpenBoxConfigInput } from "../config/openbox-config.js";
+
+import {
+  wrapCopilotRuntimeOptions,
+  type CopilotRuntimeOptionsLike
+} from "./internal/wrap-copilot-runtime-options.js";
+import {
+  attachOpenBoxRuntime,
+  OPENBOX_COPILOTKIT_RUNTIME_SYMBOL
+} from "./runtime-symbol.js";
+import type {
+  OpenBoxLogger,
+  OpenBoxMiddlewareOptions,
+  OpenBoxRuntimeController,
+  OpenBoxRuntimeDefaults
+} from "./types.js";
+
+/**
+ * Combined configuration object for `withOpenBoxRuntime`. Extends
+ * `OpenBoxConfigInput` with the CopilotKit-runtime-specific extras adopters
+ * may need to forward into the request-scoped middleware. `logger` and
+ * `defaults` are wire-level knobs reserved for advanced operators; the demo
+ * exercises only `apiKey`/`apiUrl`/`onApiError`/`agentDid`/`agentPrivateKey`
+ * plus `middlewareOptions`.
+ */
+export interface WithOpenBoxRuntimeConfig extends OpenBoxConfigInput {
+  defaults?: OpenBoxRuntimeDefaults;
+  logger?: OpenBoxLogger;
+  middlewareOptions?: OpenBoxMiddlewareOptions;
+}
+
+export interface WithOpenBoxRuntimeResult {
+  runtime: CopilotRuntime;
+  shutdown: () => Promise<void>;
+}
+
+const INSTANCE_FORM_MESSAGE =
+  "withOpenBoxRuntime: pass CopilotRuntimeOptions (not a constructed CopilotRuntime). Example: const { runtime, shutdown } = await withOpenBoxRuntime({ agents }, openboxConfig).";
+
+/**
+ * The canonical public adopter entry point. Wraps `CopilotRuntimeOptions` with
+ * OpenBox governance + telemetry and constructs the runtime in one call.
+ *
+ * Adopter footprint (the design north star):
+ *
+ *   const { runtime, shutdown } = await withOpenBoxRuntime(opts, cfg);
+ *   const app = createCopilotEndpoint({ runtime, basePath: "/api/copilotkit" });
+ *   process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
+ *
+ * Implementation detail: the controller is attached to the constructed runtime
+ * via the private `OPENBOX_COPILOTKIT_RUNTIME_SYMBOL` so the per-request
+ * before/after middleware (composed inside `wrapCopilotRuntimeOptions`) can
+ * resolve it at request time. The symbol is un-registered — external code
+ * cannot lookup the controller.
+ *
+ * The returned `shutdown` is idempotent: concurrent and repeat calls reuse
+ * the first invocation's promise. Shutdown tears down OTEL (clearing the
+ * `globalThis.fetch` patch and the Phase 2 module-private OTEL slots) and
+ * clears the runtime-attached controller.
+ */
+export async function withOpenBoxRuntime(
+  options: CopilotRuntimeOptions,
+  config: WithOpenBoxRuntimeConfig = {}
+): Promise<WithOpenBoxRuntimeResult> {
+  if (isCopilotRuntimeInstance(options)) {
+    throw new TypeError(INSTANCE_FORM_MESSAGE);
+  }
+
+  const { defaults, logger, middlewareOptions, ...openboxConfig } = config;
+
+  const wrapped = await wrapCopilotRuntimeOptions(
+    options as unknown as CopilotRuntimeOptionsLike,
+    openboxConfig,
+    {
+      ...(defaults !== undefined ? { defaults } : {}),
+      ...(logger !== undefined ? { logger } : {}),
+      ...(middlewareOptions !== undefined ? { middlewareOptions } : {})
+    }
+  );
+
+  const runtime = new CopilotRuntime(wrapped.options);
+  attachOpenBoxRuntime<OpenBoxRuntimeController>(runtime, wrapped.controller);
+
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    if (!shutdownPromise) {
+      shutdownPromise = (async () => {
+        try {
+          await wrapped.shutdown();
+        } finally {
+          delete (runtime as unknown as Record<symbol, unknown>)[
+            OPENBOX_COPILOTKIT_RUNTIME_SYMBOL
+          ];
+        }
+      })();
+    }
+    return shutdownPromise;
+  };
+
+  return { runtime, shutdown };
+}
+
+/**
+ * `CopilotRuntime` exposes the v2 class constructor as a public export, so
+ * `instanceof` is precise. A duck-type fallback would be brittle (the runtime
+ * options object happens to have several of the same property names — `agents`,
+ * `runner`, etc.).
+ */
+function isCopilotRuntimeInstance(value: unknown): boolean {
+  return value instanceof CopilotRuntime;
+}
