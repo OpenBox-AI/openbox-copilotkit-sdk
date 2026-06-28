@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 
-import { context, trace } from "@opentelemetry/api";
+import { context, ProxyTracerProvider, trace } from "@opentelemetry/api";
 import type {
   Instrumentation,
   InstrumentationConfig
@@ -198,6 +198,13 @@ let activeFileRestore: (() => void) | undefined;
 let activeHookGovernanceRuntime: HookGovernanceRuntime | undefined;
 let activeUnregister: (() => void) | undefined;
 
+// Phase 2 (CopilotKit independence rule): Module-private state for self-call
+// idempotency. Reading/writing globalThis is forbidden by the independence
+// rule — two SDK module instances (rare bundler scenarios) each maintain
+// their own slot.
+let installedController: OpenBoxTelemetryController | undefined;
+let installedConfigKey: string | undefined;
+
 export function setupOpenBoxOpenTelemetry({
   captureHttpBodies = true,
   dbLibraries,
@@ -209,6 +216,32 @@ export function setupOpenBoxOpenTelemetry({
   onHookApiError,
   spanProcessor
 }: OpenBoxTelemetryOptions): OpenBoxTelemetryController {
+  // Phase 2 step 1: self-call dedup.
+  const configKey = computeConfigKey(governanceClient);
+
+  if (installedController && installedConfigKey === configKey) {
+    return installedController;
+  }
+
+  if (installedController && installedConfigKey !== configKey) {
+    throw new Error(
+      "setupOpenBoxOpenTelemetry called twice with different configs in the same process — reconfigure flow not supported in T0. Call controller.shutdown() first."
+    );
+  }
+
+  // Phase 2 step 2: peer-OTEL detection. If anything other than the default
+  // NoopTracerProvider is registered globally, defer to the peer and emit a
+  // no-op controller. We do not clobber global state we did not create.
+  if (isPeerTracerProviderRegistered()) {
+    console.warn(
+      "[openbox-copilotkit] peer tracer provider detected, skipping OpenBox OTEL install"
+    );
+    const noOpController = createNoOpTelemetryController();
+    installedController = noOpController;
+    installedConfigKey = configKey;
+    return noOpController;
+  }
+
   teardownActiveTelemetry();
   const require = createRequire(import.meta.url);
   const { registerInstrumentations } = require(
@@ -262,14 +295,62 @@ export function setupOpenBoxOpenTelemetry({
     activeFileRestore = patchFileIo(fileSkipPatterns, hookGovernance);
   }
 
-  return {
+  const controller: OpenBoxTelemetryController = {
     instrumentations,
     async shutdown() {
       teardownActiveTelemetry();
       await tracerProvider.shutdown();
       disableGlobalTraceApi();
+      installedController = undefined;
+      installedConfigKey = undefined;
     },
     tracerProvider
+  };
+
+  installedController = controller;
+  installedConfigKey = configKey;
+  return controller;
+}
+
+function computeConfigKey(
+  governanceClient: OpenBoxClient | undefined
+): string {
+  if (!governanceClient) {
+    return "no-governance-client";
+  }
+
+  return `${governanceClient.apiUrl}::${governanceClient.apiKey}`;
+}
+
+function isPeerTracerProviderRegistered(): boolean {
+  const provider = trace.getTracerProvider();
+
+  if (!(provider instanceof ProxyTracerProvider)) {
+    return true;
+  }
+
+  const delegate = provider.getDelegate();
+
+  // The default delegate when nothing has been registered is a
+  // NoopTracerProvider (per @opentelemetry/api). Anything else means a peer
+  // (this SDK on a prior install, mastra-sdk, datadog, custom) is already
+  // registered.
+  return delegate.constructor.name !== "NoopTracerProvider";
+}
+
+function createNoOpTelemetryController(): OpenBoxTelemetryController {
+  // An unregistered NodeTracerProvider satisfies the type without touching
+  // global state. Its shutdown is harmless and idempotent.
+  const passiveProvider = new NodeTracerProvider({ spanProcessors: [] });
+
+  return {
+    instrumentations: [],
+    async shutdown() {
+      await passiveProvider.shutdown();
+      installedController = undefined;
+      installedConfigKey = undefined;
+    },
+    tracerProvider: passiveProvider
   };
 }
 
