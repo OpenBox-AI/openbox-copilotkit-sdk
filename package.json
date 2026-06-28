@@ -1,0 +1,154 @@
+{
+  "name": "@openbox-ai/openbox-copilotkit",
+  "version": "0.1.0-beta.0",
+  "description": "OpenBox server-only governance and observability SDK for CopilotKit runtime v2",
+  "license": "MIT",
+  "author": "OpenBox Team",
+  "homepage": "https://github.com/OpenBox-AI/openbox-copilotkit-sdk#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OpenBox-AI/openbox-copilotkit-sdk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/OpenBox-AI/openbox-copilotkit-sdk/issues"
+  },
+  "keywords": [
+    "openbox",
+    "copilotkit",
+    "ag-ui",
+    "governance",
+    "observability",
+    "opentelemetry"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=24.10.0"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "COPIED_FROM.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client/index.d.ts",
+      "import": "./dist/client/index.js",
+      "default": "./dist/client/index.js"
+    },
+    "./config": {
+      "types": "./dist/config/index.d.ts",
+      "import": "./dist/config/index.js",
+      "default": "./dist/config/index.js"
+    },
+    "./copilotkit": {
+      "types": "./dist/copilotkit/index.d.ts",
+      "import": "./dist/copilotkit/index.js",
+      "default": "./dist/copilotkit/index.js"
+    },
+    "./governance": {
+      "types": "./dist/governance/index.d.ts",
+      "import": "./dist/governance/index.js",
+      "default": "./dist/governance/index.js"
+    },
+    "./identity": {
+      "types": "./dist/identity/index.d.ts",
+      "import": "./dist/identity/index.js",
+      "default": "./dist/identity/index.js"
+    },
+    "./otel": {
+      "types": "./dist/otel/index.d.ts",
+      "import": "./dist/otel/index.js",
+      "default": "./dist/otel/index.js"
+    },
+    "./span": {
+      "types": "./dist/span/index.d.ts",
+      "import": "./dist/span/index.js",
+      "default": "./dist/span/index.js"
+    },
+    "./types": {
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/types/index.js",
+      "default": "./dist/types/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsup",
+    "check:copied": "node scripts/check-copied-drift.mjs",
+    "check:no-mastra": "node scripts/check-no-mastra-imports.mjs",
+    "ci:check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run check:copied && npm run check:no-mastra",
+    "clean": "rm -rf coverage dist",
+    "format": "prettier --write .",
+    "lint": "eslint .",
+    "pack:check": "npm pack --dry-run",
+    "prepack": "npm run clean && npm run build",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run test && npm run check:copied && npm run check:no-mastra",
+    "test": "vitest run --coverage",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@ag-ui/client": "^0.0.57",
+    "@copilotkit/runtime": "^1.61.0"
+  },
+  "peerDependenciesMeta": {
+    "@ag-ui/client": {
+      "optional": false
+    },
+    "@copilotkit/runtime": {
+      "optional": false
+    }
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "@opentelemetry/instrumentation-cassandra-driver": "^0.52.0",
+    "@opentelemetry/instrumentation-fs": "^0.26.0",
+    "@opentelemetry/instrumentation-http": "^0.218.0",
+    "@opentelemetry/instrumentation-ioredis": "^0.54.0",
+    "@opentelemetry/instrumentation-knex": "^0.51.0",
+    "@opentelemetry/instrumentation-mongodb": "^0.59.0",
+    "@opentelemetry/instrumentation-mongoose": "^0.53.0",
+    "@opentelemetry/instrumentation-mysql": "^0.52.0",
+    "@opentelemetry/instrumentation-mysql2": "^0.53.0",
+    "@opentelemetry/instrumentation-oracledb": "^0.32.0",
+    "@opentelemetry/instrumentation-pg": "^0.59.0",
+    "@opentelemetry/instrumentation-redis": "^0.55.0",
+    "@opentelemetry/instrumentation-tedious": "^0.25.0",
+    "@opentelemetry/instrumentation-undici": "^0.17.0",
+    "@opentelemetry/resources": "^2.7.1",
+    "@opentelemetry/sdk-node": "^0.218.0",
+    "@opentelemetry/sdk-trace-base": "^2.7.1",
+    "@opentelemetry/sdk-trace-node": "^2.7.1",
+    "zod": "^4.1.5"
+  },
+  "devDependencies": {
+    "@ag-ui/client": "^0.0.57",
+    "@copilotkit/runtime": "^1.61.0",
+    "@types/node": "^24.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.42.0",
+    "@typescript-eslint/parser": "^8.42.0",
+    "@vitest/coverage-v8": "^3.2.4",
+    "eslint": "^9.34.0",
+    "eslint-config-prettier": "^10.1.8",
+    "msw": "^2.11.2",
+    "prettier": "^3.6.2",
+    "tsup": "^8.5.0",
+    "typescript": "^5.9.2",
+    "typescript-eslint": "^8.42.0",
+    "vitest": "^3.2.4"
+  }
+}
