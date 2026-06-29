@@ -288,7 +288,12 @@ export class OpenBoxMiddleware extends Middleware {
             goal,
             metadata,
             multiAgentSessionId: state.multiAgentSessionId,
-            payload: state.userInput,
+            // In multi-agent mode the signal is array-shaped for the backend
+            // timeline; pass the user's text so element 0 renders cleanly
+            // instead of a JSON-stringified message object.
+            payload: state.multiAgentSessionId
+              ? extractUserText(state.userInput)
+              : state.userInput,
             runId: state.runId,
             signalName: USER_INPUT_SIGNAL_NAME,
             workflowId: state.workflowId
@@ -626,6 +631,26 @@ export class OpenBoxMiddleware extends Middleware {
     return this.#multiAgent?.handoffTools?.[call.name];
   }
 
+  #forwardMultiAgentContext(
+    ctx: OpenBoxMultiAgentContext,
+    state: PerRunState
+  ): Record<string, unknown> | undefined {
+    const adapter = this.#multiAgent?.forwardContext;
+    if (!adapter) {
+      return undefined;
+    }
+    try {
+      return adapter(ctx) ?? undefined;
+    } catch (err) {
+      this.#logger.warn?.({
+        err,
+        note: "openbox multi-agent: forwardContext adapter threw — swallowed",
+        workflow_id: state.workflowId
+      });
+      return undefined;
+    }
+  }
+
   /**
    * If the just-started activity maps to a configured subagent, emit exactly
    * one `Handoff` per delegation. Sent as the child agent (so Core resolves
@@ -674,6 +699,10 @@ export class OpenBoxMiddleware extends Middleware {
         parentWorkflowId: state.workflowId
       };
 
+      // Hand the context to the operator's forwarding adapter (e.g. to stash it
+      // for the delegate tool to set on the child's RuntimeContext).
+      const forwarded = this.#forwardMultiAgentContext(multiAgentContext, state);
+
       const handoffMetadata: Record<string, unknown> = {
         child_agent_name: childAgentName,
         ...(config.childTaskQueue
@@ -683,6 +712,7 @@ export class OpenBoxMiddleware extends Middleware {
           ? { child_workflow_type: config.childWorkflowType }
           : {}),
         delegate_tool_name: entry.toolName,
+        ...(forwarded ? { forwarded_context: forwarded } : {}),
         openbox_multi_agent_context: multiAgentContext,
         parent_activity_id: activityId,
         parent_workflow_id: state.workflowId
@@ -785,6 +815,22 @@ function extractLastUserMessage(
     }
   }
   return undefined;
+}
+
+/**
+ * Reduce a user message to its text content for the array-shaped timeline
+ * signal. Falls back to the original value when content is not a plain string
+ * (e.g. multi-part content) — the emitter then array-wraps it and the backend
+ * JSON-stringifies element 0.
+ */
+function extractUserText(message: unknown): unknown {
+  if (message && typeof message === "object") {
+    const content = (message as { content?: unknown }).content;
+    if (typeof content === "string") {
+      return content;
+    }
+  }
+  return message;
 }
 
 function parseToolArgs(raw: string): unknown {

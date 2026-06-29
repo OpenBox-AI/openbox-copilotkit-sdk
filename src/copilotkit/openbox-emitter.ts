@@ -179,7 +179,10 @@ export class OpenBoxCopilotKitEmitter {
       ...(input.metadata ? { metadata: input.metadata } : {}),
       ...multiAgentFields(input),
       run_id: input.runId,
-      signal_args: serializeSignalArgs(input.payload),
+      signal_args: serializeSignalArgs(
+        input.payload,
+        Boolean(input.multiAgentSessionId)
+      ),
       signal_name: input.signalName,
       workflow_id: input.workflowId,
       workflow_type: COPILOTKIT_WORKFLOW_TYPE
@@ -459,11 +462,13 @@ function serializeWorkflowOutput(value: unknown): unknown {
   return safeSerialize(value);
 }
 
-function serializeSignalArgs(value: unknown): unknown {
-  if (value === undefined || value === null) {
-    return { value: null };
-  }
-  return { value: safeSerialize(value) };
+function serializeSignalArgs(value: unknown, asArray: boolean): unknown {
+  const serialized =
+    value === undefined || value === null ? null : safeSerialize(value);
+  // Multi-agent mode emits the array shape the OpenBox backend timeline reads
+  // (its extractSignalText takes element 0). Standalone mode keeps the legacy
+  // `{ value }` shape so non-multi-agent payloads are byte-identical.
+  return asArray ? [serialized] : { value: serialized };
 }
 
 function serializeActivityInput(value: unknown): unknown {

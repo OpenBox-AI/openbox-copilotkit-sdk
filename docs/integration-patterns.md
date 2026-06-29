@@ -209,6 +209,17 @@ const { runtime, shutdown } = await withOpenBoxRuntime(
         },
         // Or resolve dynamically instead of a static map:
         // resolveHandoff: (call, ctx) => call.name === "weatherTool" ? {...} : null,
+
+        // Forward the grouping context to the child runtime. The SDK only
+        // OBSERVES tool calls — it cannot inject into the child invocation — so
+        // use this hook to bridge the gap (e.g. stash ctx keyed by
+        // parentActivityId for the delegate tool to set on the child's
+        // RuntimeContext). Anything you return is merged into the Handoff
+        // metadata under `forwarded_context`.
+        forwardContext: (ctx) => {
+          pendingChildContext.set(ctx.parentActivityId, ctx);
+          return { correlation_id: ctx.parentActivityId };
+        },
       },
     },
   }
@@ -229,16 +240,26 @@ const { runtime, shutdown } = await withOpenBoxRuntime(
 ### Completing the group on the child side
 
 `multi_agent_session_id` grouping requires **both** sessions to carry the same id.
-This SDK stamps it on the CopilotKit (parent) stream. The child runtime must also:
+CopilotKit (parent) stamps it on its stream and **owns the `Handoff`** (emitted
+parent-side via the child-scoped client above — the child does not emit one, so
+there is no double handoff). The child SDKs (Mastra/CrewAI) already support
+multi-agent flows; they only need the grouping context, which `forwardContext`
+propagates. The child then:
 
-1. emit `Handoff` (if not emitted parent-side),
-2. stamp the same `multi_agent_session_id` on its `WorkflowStarted` + lifecycle events,
-3. stamp `parent_workflow_id` (from the propagated context) on its workflow events.
+1. stamps the same `multi_agent_session_id` on its `WorkflowStarted` + lifecycle events,
+2. stamps `parent_workflow_id` (from the forwarded context) on its workflow events.
 
-For a Mastra child, that is the Mastra SDK's responsibility. Until the child
-propagates the context, you get the parent session grouped + a Handoff edge, but the
-child session will not join the group — see
-[troubleshooting → independent streams](./troubleshooting.md#10-copilotkit-and-mastra-show-as-two-separate-runs-not-one-multi-agent-run).
+The one piece of glue you wire in your app: read what `forwardContext` stashed and
+set it on the child invocation (e.g. Mastra `RuntimeContext`). No child-SDK code
+change is required.
+
+### Backend-compatible timeline signals
+
+In multi-agent mode the parent emits **array-shaped** `signal_args`
+(`["<text>"]`) for the timeline-visible `user_input` / `agent_output` signals —
+the shape the OpenBox backend timeline already reads — so CopilotKit messages
+render in the run detail with **no backend change**. With multi-agent disabled the
+legacy `{ value }` shape is preserved unchanged.
 
 ### Expected event order (prompt: "what is the weather in tokyo?")
 

@@ -93,6 +93,17 @@ export interface OpenBoxMultiAgentOptions {
     call: OpenBoxObservedToolCall,
     ctx: MultiAgentSessionContext
   ) => OpenBoxSubagentHandoffConfig | null | undefined;
+  /**
+   * Adapter invoked at each delegation boundary with the built
+   * `OpenBoxMultiAgentContext`. Use it to forward the context to the child
+   * runtime — e.g. stash it (keyed by `parentActivityId`) so the delegate tool
+   * can attach it to the child invocation's `RuntimeContext`. Any record it
+   * returns is merged into the Handoff metadata under `forwarded_context`.
+   * CopilotKit-side only; it never edits child SDKs. Errors are swallowed.
+   */
+  forwardContext?: (
+    ctx: OpenBoxMultiAgentContext
+  ) => Record<string, unknown> | undefined;
 }
 
 /**

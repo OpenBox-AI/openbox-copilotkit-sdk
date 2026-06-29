@@ -263,4 +263,117 @@ describe("OpenBoxMiddleware multi-agent", () => {
       expect(call.multi_agent_session_id).toBe("session-run-1");
     }
   });
+
+  it("emits array-shaped timeline signals (backend-compatible) when enabled", async () => {
+    const { controller, evaluateMock } = buildController();
+    const middleware = createOpenBoxMiddleware(controller, {
+      multiAgent: { enabled: true, parentAgentDid: PARENT_DID }
+    });
+    const agent = new ScriptedAgent({
+      events: [
+        {
+          messageId: "m1",
+          role: "assistant",
+          type: EventType.TEXT_MESSAGE_START
+        } as BaseEvent,
+        {
+          delta: "Sunny",
+          messageId: "m1",
+          type: EventType.TEXT_MESSAGE_CONTENT
+        } as BaseEvent,
+        { messageId: "m1", type: EventType.TEXT_MESSAGE_END } as BaseEvent,
+        { type: EventType.RUN_FINISHED } as BaseEvent
+      ]
+    });
+
+    await collectEvents(middleware.run(buildRunAgentInput(), agent));
+
+    const signals = payloadsOf(evaluateMock).filter(
+      p => p.event_type === WorkflowEventType.SIGNAL_RECEIVED
+    );
+    const userInput = signals.find(s => s.signal_name === "user_input");
+    const agentOutput = signals.find(s => s.signal_name === "agent_output");
+    // user message text extracted to element 0 (not a JSON-stringified object)
+    expect(userInput?.signal_args).toEqual(["Hi there"]);
+    expect(agentOutput?.signal_args).toEqual(["Sunny"]);
+  });
+
+  it("keeps the legacy { value } signal shape when multi-agent is disabled", async () => {
+    const { controller, evaluateMock } = buildController();
+    const middleware = createOpenBoxMiddleware(controller);
+    const agent = new ScriptedAgent({
+      events: [{ type: EventType.RUN_FINISHED } as BaseEvent]
+    });
+
+    await collectEvents(middleware.run(buildRunAgentInput(), agent));
+
+    const userInput = payloadsOf(evaluateMock).find(
+      p => p.signal_name === "user_input"
+    );
+    expect(Array.isArray(userInput?.signal_args)).toBe(false);
+    expect(userInput?.signal_args).toHaveProperty("value");
+  });
+
+  it("invokes forwardContext with the built context and merges its result into handoff metadata", async () => {
+    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null);
+    const forwardContext = vi.fn().mockReturnValue({ stashed: true });
+    const onEvent = vi.fn();
+    const { controller } = buildController();
+    const middleware = createOpenBoxMiddleware(controller, {
+      multiAgent: {
+        enabled: true,
+        forwardContext,
+        handoffTools,
+        parentAgentDid: PARENT_DID
+      },
+      onEvent
+    });
+    const agent = new ScriptedAgent({ events: weatherToolEvents() });
+
+    await collectEvents(middleware.run(buildRunAgentInput(), agent));
+
+    expect(forwardContext).toHaveBeenCalledTimes(1);
+    const ctx = forwardContext.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(ctx.multiAgentSessionId).toBe("mas:run-1");
+    expect(ctx.parentAgentDid).toBe(PARENT_DID);
+    expect(ctx.parentActivityId).toBe("call-w");
+    expect(ctx.parentRunId).toBe("run-1");
+    expect(ctx.parentWorkflowId).toBe("thread-1");
+
+    const handoff = onEvent.mock.calls
+      .map(args => args[0] as { eventType: string; payload: Record<string, unknown> })
+      .find(e => e.eventType === (WorkflowEventType.HANDOFF as string));
+    const meta = handoff?.payload.metadata as Record<string, unknown>;
+    expect(meta.forwarded_context).toEqual({ stashed: true });
+  });
+
+  it("isolates a throwing forwardContext adapter (run completes, handoff still emitted, no forwarded_context)", async () => {
+    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null);
+    const onEvent = vi.fn();
+    const { controller, logger } = buildController();
+    const middleware = createOpenBoxMiddleware(controller, {
+      multiAgent: {
+        enabled: true,
+        forwardContext: () => {
+          throw new Error("boom");
+        },
+        handoffTools,
+        parentAgentDid: PARENT_DID
+      },
+      onEvent
+    });
+    const agent = new ScriptedAgent({ events: weatherToolEvents() });
+
+    const events = await collectEvents(middleware.run(buildRunAgentInput(), agent));
+
+    // The run is unaffected: events flow through and the Handoff is still emitted.
+    expect(events.length).toBeGreaterThan(0);
+    const handoff = onEvent.mock.calls
+      .map(args => args[0] as { eventType: string; payload: Record<string, unknown> })
+      .find(e => e.eventType === (WorkflowEventType.HANDOFF as string));
+    expect(handoff).toBeDefined();
+    const meta = handoff?.payload.metadata as Record<string, unknown>;
+    expect(meta).not.toHaveProperty("forwarded_context");
+    expect(logger.warn).toHaveBeenCalled();
+  });
 });

@@ -29,7 +29,13 @@ are separate repos (see "Remaining").
 - **Dedup** key: `mas::parentDid::childAgentName::parentActivityId` (`PerRunState.emittedHandoffs`). Backstop on top of `entry.activityStarted` early-return.
 - **`multiAgentSessionId`** default = `mas:${runId}` (string or `(ctx) => string` override). Stored once per run in `PerRunState`.
 - **parent_workflow_id** is NEVER set on the CopilotKit parent stream (it IS the parent). The field exists in emitter inputs for the child/wire shape; the child (Mastra) sets it. Structurally impossible on signal/activity inputs (field absent there).
-- Handoff marker carries ONLY reserved keys (`delegate_tool_name`, `child_agent_name`, `child_workflow_type`, `child_task_queue`, `parent_activity_id`, `parent_workflow_id`, `openbox_multi_agent_context`) — request ALS metadata is intentionally NOT spread in (trust boundary; matches plan spec).
+- Handoff marker carries ONLY reserved keys (`delegate_tool_name`, `child_agent_name`, `child_workflow_type`, `child_task_queue`, `parent_activity_id`, `parent_workflow_id`, `openbox_multi_agent_context`, plus `forwarded_context` if the adapter returns one) — request ALS metadata is intentionally NOT spread in (trust boundary; matches plan spec).
+
+## Narrowed design (2026-06-29 follow-up, backend/Mastra/CrewAI/core OFF-limits)
+
+- **Backend is NOT changed.** Instead, multi-agent mode emits **array-shaped** `signal_args` (`["<text>"]`) for the timeline signals (`user_input`/`agent_output`), which the backend's array-only `extractSignalText` (reads `parsed[0]`) already consumes. Disabled mode keeps `{ value }`. `user_input` text is extracted from the message object via `extractUserText` so element 0 renders cleanly. Toggle lives in emitter `serializeSignalArgs(value, asArray)`, gated on `input.multiAgentSessionId`.
+- **CopilotKit OWNS the Handoff** (parent-side via child-scoped client). Child SDKs already support multi-agent and do NOT emit a Handoff → no double-handoff. Child only needs the grouping context.
+- **`forwardContext?: (ctx: OpenBoxMultiAgentContext) => Record<string,unknown>`** on `OpenBoxMultiAgentOptions` is the propagation hook (SDK only observes tool calls; it can't inject into the child call). Called once per delegation in `#maybeEmitHandoff` (try/catch, swallow). Return value merged into Handoff `metadata.forwarded_context`. The actual child-call wiring (stash ctx → set on child RuntimeContext) is demo-app glue, NOT SDK code.
 
 ## Gotchas (would burn an hour to rediscover)
 

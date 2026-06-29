@@ -194,6 +194,37 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
     expect(WorkflowEventType.HANDOFF).toBe("Handoff");
   });
 
+  it("emits array-shaped signal_args when multiAgentSessionId is set", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+
+    await emitter.emitSignalReceived({
+      multiAgentSessionId: "mas:run-X",
+      payload: "what is the weather in tokyo?",
+      runId: "run-X",
+      signalName: "user_input",
+      workflowId: "thread-X"
+    });
+
+    const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.signal_args).toEqual(["what is the weather in tokyo?"]);
+  });
+
+  it("keeps { value } signal_args when multiAgentSessionId is absent", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+
+    await emitter.emitSignalReceived({
+      payload: "hello",
+      runId: "run-X",
+      signalName: "user_input",
+      workflowId: "thread-X"
+    });
+
+    const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.signal_args).toEqual({ value: "hello" });
+  });
+
   it("stamps multi_agent_session_id on WorkflowStarted when provided", async () => {
     const { controller, evaluateMock } = buildController();
     const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
