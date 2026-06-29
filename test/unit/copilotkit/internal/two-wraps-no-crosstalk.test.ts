@@ -7,14 +7,6 @@ import {
 import { EMPTY, Observable } from "rxjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../../src/otel/setup-openbox-opentelemetry.js", () => ({
-  setupOpenBoxOpenTelemetry: vi.fn(() => ({
-    instrumentations: [],
-    shutdown: vi.fn(async () => {}),
-    tracerProvider: {}
-  }))
-}));
-
 import { wrapCopilotRuntimeOptions } from "../../../../src/copilotkit/internal/wrap-copilot-runtime-options.js";
 import { WorkflowEventType } from "../../../../src/types/workflow-event-type.js";
 

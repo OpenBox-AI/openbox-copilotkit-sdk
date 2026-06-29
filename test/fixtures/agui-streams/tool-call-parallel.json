@@ -1,0 +1,13 @@
+{
+  "note": "Two parallel tool calls — each gets a distinct tool_call_id; spans must be distinct.",
+  "events": [
+    { "type": "TOOL_CALL_START", "toolCallId": "call-a", "toolCallName": "setThemeColor" },
+    { "type": "TOOL_CALL_START", "toolCallId": "call-b", "toolCallName": "searchDocs" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-a", "delta": "{\"color\":\"blue\"}" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-b", "delta": "{\"q\":\"openbox\"}" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-a" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-b" },
+    { "type": "TOOL_CALL_RESULT", "toolCallId": "call-a", "content": "{\"ok\":true}" },
+    { "type": "TOOL_CALL_RESULT", "toolCallId": "call-b", "content": "{\"hits\":3}" }
+  ]
+}

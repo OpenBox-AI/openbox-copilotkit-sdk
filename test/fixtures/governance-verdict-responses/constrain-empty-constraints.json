@@ -1,0 +1,5 @@
+{
+  "verdict": "constrain",
+  "reason": "Reduce arguments to safe subset",
+  "constraints": []
+}

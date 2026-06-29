@@ -10,9 +10,13 @@ const REQUIRED_FRAMEWORK_EXPORTS = [
 
 const REQUIRED_SHARED_EXPORTS = [
   "OpenBoxClient",
+  "parseOpenBoxConfig"
+] as const;
+
+const FORBIDDEN_ROOT_EXPORTS = [
   "OpenBoxSpanProcessor",
-  "parseOpenBoxConfig",
-  "setupOpenBoxOpenTelemetry"
+  "setupOpenBoxOpenTelemetry",
+  "WorkflowSpanBuffer"
 ] as const;
 
 // Anything in this list MUST NOT leak out of the public surface. They are
@@ -72,6 +76,15 @@ describe("src/index.ts root public surface", () => {
       expect(
         (rootPublic as Record<string, unknown>)[name],
         `expected src/index.ts to NOT export ${name} — it is internal`
+      ).toBeUndefined();
+    }
+  });
+
+  it("does NOT re-export any removed OTel/span symbol from the root barrel", () => {
+    for (const name of FORBIDDEN_ROOT_EXPORTS) {
+      expect(
+        (rootPublic as Record<string, unknown>)[name],
+        `expected src/index.ts to NOT export ${name} — removed in 0.2.0-beta.0`
       ).toBeUndefined();
     }
   });

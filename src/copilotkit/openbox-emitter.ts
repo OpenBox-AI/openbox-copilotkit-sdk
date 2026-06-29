@@ -1,8 +1,7 @@
 import type { OpenBoxClient } from "../client/openbox-client.js";
-import type { OpenBoxSpanProcessor } from "../span/openbox-span-processor.js";
+import type { SpanData } from "../spans/index.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { WorkflowEventType } from "../types/workflow-event-type.js";
-import { WorkflowSpanBuffer } from "../types/workflow-span-buffer.js";
 
 import type {
   OpenBoxEmission,
@@ -79,6 +78,32 @@ export interface ActivityCompletedInput {
   workflowId: string;
 }
 
+/**
+ * Carrier for a synthesized `function_call` span. Emitted as a separate
+ * `ActivityStarted`-shaped event with `hook_trigger: true` and
+ * `hook_stage: "completed"` so it lands on openbox-core via the same
+ * code path that accepts mastra-sdk's hook spans (HTTP/DB instrumentation).
+ *
+ * Background: openbox-core rejects `ActivityCompleted` payloads that carry
+ * a `spans` field (returns 400 invalid request body), so we cannot inline
+ * the span on the original completion event. Posting a sibling event with
+ * the same `activityId` but `activity_type: "function_call"` ties the span
+ * back to the originating tool call without changing the completion shape.
+ */
+export interface ActivityCompletedHookInput {
+  activityArgs?: unknown;
+  activityId: string;
+  agentId?: string | undefined;
+  durationMs?: number | undefined;
+  endTime?: number | undefined;
+  goal?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  runId: string;
+  span: SpanData;
+  startTime?: number | undefined;
+  workflowId: string;
+}
+
 export interface WorkflowCompletedInput extends MultiAgentEventFields {
   agentOutput?: unknown;
   durationMs?: number | undefined;
@@ -115,14 +140,13 @@ export interface HandoffEmitInput {
 }
 
 /**
- * Wraps `client.evaluate` + `OpenBoxSpanProcessor` registrations for every
- * CopilotKit-observed AG-UI event. Each emit method:
+ * Wraps `client.evaluate` for every CopilotKit-observed AG-UI event. Each
+ * emit method:
  *
- *   1. Registers the workflow / trace with the span processor when needed.
- *   2. Builds a payload shape mirroring `openbox-mastra-sdk/src/mastra/wrap-agent.ts:2031-2074`.
- *   3. Awaits `client.evaluate(payload)` so the optional `enforceApprovals`
+ *   1. Builds a payload shape mirroring `openbox-mastra-sdk/src/mastra/wrap-agent.ts:2031-2074`.
+ *   2. Awaits `client.evaluate(payload)` so the optional `enforceApprovals`
  *      caller can inspect the verdict.
- *   4. On error: logs via `runtime.logger.warn` and swallows (fail-open). The
+ *   3. On error: logs via `runtime.logger.warn` and swallows (fail-open). The
  *      observable stream never errors from emitter failures.
  *
  * Verdict objects are returned to the caller so the middleware can decide
@@ -132,15 +156,12 @@ export class OpenBoxCopilotKitEmitter {
   readonly #client: OpenBoxClient;
   readonly #logger: OpenBoxRuntimeController["logger"];
   readonly #onEvent: OpenBoxMiddlewareOptions["onEvent"];
-  readonly #registeredWorkflows = new Set<string>();
-  readonly #spanProcessor: OpenBoxSpanProcessor;
 
   public constructor(
     runtime: OpenBoxRuntimeController,
     onEvent: OpenBoxMiddlewareOptions["onEvent"]
   ) {
     this.#client = runtime.client;
-    this.#spanProcessor = runtime.spanProcessor;
     this.#logger = runtime.logger;
     this.#onEvent = onEvent;
   }
@@ -148,8 +169,6 @@ export class OpenBoxCopilotKitEmitter {
   public async emitWorkflowStarted(
     input: WorkflowStartedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    this.#ensureWorkflowRegistered(input.workflowId, input.runId);
-
     const payload = withBaseEnvelope({
       event_type: WorkflowEventType.WORKFLOW_STARTED,
       ...(input.goal ? { goal: input.goal } : {}),
@@ -250,6 +269,52 @@ export class OpenBoxCopilotKitEmitter {
     return this.#evaluate(payload, {
       activityId: input.activityId,
       eventType: WorkflowEventType.ACTIVITY_COMPLETED,
+      workflowId: input.workflowId
+    });
+  }
+
+  /**
+   * Sibling event to `emitActivityCompleted` that carries the synthesized
+   * `function_call` span. Shaped as `ActivityStarted` with `hook_trigger:
+   * true` and a `stage: "completed"` field on the span itself — openbox-core
+   * derives `hook_stage` from `span.stage`, matching the shape that
+   * `openbox-mastra-sdk` ships for its HTTP/DB hook spans. Same `activity_id`
+   * as the original completion event ties the two phases at the session UI.
+   *
+   * Intentionally omits `activity_output` (ActivityStarted events never carry
+   * outputs in the accepted shape — openbox-core rejects with 400 otherwise)
+   * and `tool_name` (not part of the validated schema).
+   */
+  public async emitActivityCompletedHook(
+    input: ActivityCompletedHookInput
+  ): Promise<GovernanceVerdictResponse | null> {
+    const wireSpan = toWireSpan(input.span);
+    const payload = withBaseEnvelope({
+      activity_id: input.activityId,
+      activity_input: serializeActivityInput(input.activityArgs),
+      activity_type: "function_call",
+      ...(input.agentId ? { agent_id: input.agentId } : {}),
+      attempt: 1,
+      ...(typeof input.durationMs === "number"
+        ? { duration_ms: input.durationMs }
+        : {}),
+      ...(typeof input.endTime === "number" ? { end_time: input.endTime } : {}),
+      event_type: WorkflowEventType.ACTIVITY_STARTED,
+      ...(input.goal ? { goal: input.goal } : {}),
+      hook_trigger: true,
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+      run_id: input.runId,
+      spans: [wireSpan],
+      ...(typeof input.startTime === "number"
+        ? { start_time: input.startTime }
+        : {}),
+      workflow_id: input.workflowId,
+      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    });
+
+    return this.#evaluate(payload, {
+      activityId: input.activityId,
+      eventType: WorkflowEventType.ACTIVITY_STARTED,
       workflowId: input.workflowId
     });
   }
@@ -401,25 +466,6 @@ export class OpenBoxCopilotKitEmitter {
     }
   }
 
-  #ensureWorkflowRegistered(workflowId: string, runId: string): void {
-    const runKey = `${workflowId}::${runId}`;
-
-    if (this.#registeredWorkflows.has(runKey)) {
-      return;
-    }
-
-    this.#registeredWorkflows.add(runKey);
-    this.#spanProcessor.registerWorkflow(
-      workflowId,
-      new WorkflowSpanBuffer({
-        runId,
-        taskQueue: COPILOTKIT_TASK_QUEUE,
-        workflowId,
-        workflowType: COPILOTKIT_WORKFLOW_TYPE
-      })
-    );
-  }
-
 }
 
 function withBaseEnvelope(
@@ -483,6 +529,57 @@ function serializeActivityOutput(value: unknown): unknown {
     return null;
   }
   return safeSerialize(value);
+}
+
+/**
+ * Transform an internal `SpanData` into the wire shape openbox-core's
+ * `GovernanceEventPayload.Spans` array expects. The internal `SpanData`
+ * mirrors the OTel JSON convention (`start_time_unix_nano: bigint`,
+ * `status: "ok"|"error"`); openbox-core's Go schema uses different field
+ * names and types (`start_time: int64`, `status: { code: "OK"|"ERROR" }`,
+ * top-level `semantic_type` / `hook_type` / `kind`). Validated empirically
+ * against `openbox-core/internal/content/governance.go:SpanData` and the
+ * `function_call` shape that `openbox-mastra-sdk`'s `createHookSpan`
+ * produces (the only shape openbox-core has been observed to accept for
+ * inline spans).
+ *
+ * Nano-time fields ship as JS Numbers — openbox-core unmarshals JSON
+ * numbers into `int64` (it rejects strings). Numbers larger than 2^53 lose
+ * trailing-ns precision, which is acceptable for tracing in the current era.
+ * The internal `SpanBuffer` keeps the raw `bigint` shape — this transform
+ * applies only at the wire boundary.
+ */
+function toWireSpan(span: SpanData): Record<string, unknown> {
+  const startTime = Number(span.start_time_unix_nano);
+  const endTime = Number(span.end_time_unix_nano);
+  const attrs = { ...span.attributes } as Record<string, unknown>;
+  const toolNameAttr = attrs["tool.name"];
+  const toolName = typeof toolNameAttr === "string" ? toolNameAttr : undefined;
+
+  const wire: Record<string, unknown> = {
+    attributes: attrs,
+    duration_ns: Math.max(0, endTime - startTime),
+    end_time: endTime,
+    events: [],
+    ...(toolName ? { function: toolName } : {}),
+    hook_type: "function_call",
+    kind: "INTERNAL",
+    name: span.name,
+    semantic_type: "function_call",
+    span_id: span.span_id,
+    stage: "completed",
+    start_time: startTime,
+    status: {
+      code: span.status === "error" ? "ERROR" : "OK"
+    },
+    trace_id: span.trace_id
+  };
+
+  if (span.parent_span_id) {
+    wire.parent_span_id = span.parent_span_id;
+  }
+
+  return wire;
 }
 
 function safeSerialize(value: unknown): unknown {

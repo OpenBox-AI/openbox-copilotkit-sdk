@@ -2,8 +2,7 @@ import {
   GovernanceVerdictResponse,
   GuardrailsCheckResult,
   Verdict,
-  WorkflowEventType,
-  WorkflowSpanBuffer
+  WorkflowEventType
 } from "../../src/index.js";
 
 describe("WorkflowEventType", () => {
@@ -78,45 +77,6 @@ describe("Verdict", () => {
     expect(Verdict.shouldStop(Verdict.CONSTRAIN)).toBe(false);
     expect(Verdict.requiresApproval(Verdict.REQUIRE_APPROVAL)).toBe(true);
     expect(Verdict.requiresApproval(Verdict.ALLOW)).toBe(false);
-  });
-});
-
-describe("WorkflowSpanBuffer", () => {
-  it("uses SDK defaults", () => {
-    const buffer = new WorkflowSpanBuffer({
-      runId: "run-456",
-      taskQueue: "test-queue",
-      workflowId: "wf-123",
-      workflowType: "TestWorkflow"
-    });
-
-    expect(buffer.parentWorkflowId).toBeUndefined();
-    expect(buffer.spans).toEqual([]);
-    expect(buffer.status).toBeUndefined();
-    expect(buffer.error).toBeUndefined();
-    expect(buffer.verdict).toBeUndefined();
-    expect(buffer.verdictReason).toBeUndefined();
-    expect(buffer.pendingApproval).toBe(false);
-  });
-
-  it("does not share span arrays across instances", () => {
-    const first = new WorkflowSpanBuffer({
-      runId: "run-1",
-      taskQueue: "test-queue",
-      workflowId: "wf-1",
-      workflowType: "TestWorkflow"
-    });
-    const second = new WorkflowSpanBuffer({
-      runId: "run-2",
-      taskQueue: "test-queue",
-      workflowId: "wf-2",
-      workflowType: "TestWorkflow"
-    });
-
-    first.spans.push({ name: "span-1" });
-
-    expect(first.spans).toHaveLength(1);
-    expect(second.spans).toHaveLength(0);
   });
 });
 

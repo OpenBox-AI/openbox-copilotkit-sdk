@@ -59,9 +59,9 @@ const INSTANCE_FORM_MESSAGE =
  * cannot lookup the controller.
  *
  * The returned `shutdown` is idempotent: concurrent and repeat calls reuse
- * the first invocation's promise. Shutdown tears down OTEL (clearing the
- * `globalThis.fetch` patch and the Phase 2 module-private OTEL slots) and
- * clears the runtime-attached controller.
+ * the first invocation's promise. It resolves to an inner `Promise.resolve()`
+ * (reserved for future client-side cleanup) and clears the runtime-attached
+ * controller.
  */
 export async function withOpenBoxRuntime(
   options: CopilotRuntimeOptions,

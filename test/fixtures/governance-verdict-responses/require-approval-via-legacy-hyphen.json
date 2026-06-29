@@ -1,0 +1,4 @@
+{
+  "action": "require-approval",
+  "reason": "Legacy hyphenated string is normalized"
+}

@@ -1,0 +1,4 @@
+{
+  "action": "stop",
+  "reason": "Legacy stop alias maps to halt"
+}

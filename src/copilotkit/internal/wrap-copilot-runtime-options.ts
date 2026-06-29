@@ -6,8 +6,6 @@ import {
   type OpenBoxConfig,
   type OpenBoxConfigInput
 } from "../../config/openbox-config.js";
-import { setupOpenBoxOpenTelemetry } from "../../otel/setup-openbox-opentelemetry.js";
-import { OpenBoxSpanProcessor } from "../../span/openbox-span-processor.js";
 import { OpenBoxConfigError } from "../../types/errors.js";
 import type {
   OpenBoxLogger,
@@ -114,7 +112,10 @@ export interface WrapCopilotRuntimeOptionsResult<
 > {
   controller: OpenBoxRuntimeController;
   options: WrappedCopilotRuntimeOptions<TOptions>;
-  /** Tear down OTEL and any resources we own. Idempotent. */
+  /**
+   * Idempotent no-op resolved promise. Reserved for future client-side
+   * cleanup. Safe to leave SIGINT handlers in place.
+   */
   shutdown: () => Promise<void>;
 }
 
@@ -166,19 +167,11 @@ export async function wrapCopilotRuntimeOptions<
   const config: OpenBoxConfig = parseOpenBoxConfig(configInput);
   const logger = extras.logger ?? DEFAULT_LOGGER;
   const client = buildClient(config);
-  const spanProcessor = new OpenBoxSpanProcessor();
-  const otelController = setupOpenBoxOpenTelemetry({
-    governanceClient: client,
-    ignoredUrls: [client.apiUrl],
-    onHookApiError: config.onApiError,
-    spanProcessor
-  });
 
   const controller: OpenBoxRuntimeController = {
     client,
     defaults: extras.defaults ?? {},
-    logger,
-    spanProcessor
+    logger
   };
 
   const markerSymbol = Symbol("openbox.copilotkit.wrap");
@@ -226,7 +219,7 @@ export async function wrapCopilotRuntimeOptions<
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = async () => {
     if (!shutdownPromise) {
-      shutdownPromise = otelController.shutdown();
+      shutdownPromise = Promise.resolve();
     }
     await shutdownPromise;
   };

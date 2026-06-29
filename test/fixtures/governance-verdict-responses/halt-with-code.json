@@ -1,0 +1,7 @@
+{
+  "verdict": "halt",
+  "reason": "Hard policy violation",
+  "metadata": {
+    "code": "SAFETY_RAIL_TRIPPED"
+  }
+}

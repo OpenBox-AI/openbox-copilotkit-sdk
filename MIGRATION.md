@@ -1,0 +1,114 @@
+# Migration
+
+## Unreleased (target: `0.3.0-beta.0`)
+
+`0.3.0-beta.0` is **additive** at the AG-UI middleware boundary. Existing call sites continue to work unchanged; the new surface is opt-in.
+
+### What changes
+
+1. **New public types** under the package root: `OpenBoxVerdict`, `OpenBoxConstraint`, `OpenBoxReplacement`, `ApplierContext`, `ApplierResult`, `SpanData`, `SpanBuffer`, `EnforcementStatus`, plus the helper functions `mapVerdict`, `applyVerdict`, `synthesizeToolSpan`, `attachAuditEnvelope`, `idempotencyKey`. The existing `Verdict` enum and `GovernanceVerdictResponse` class are **unchanged**.
+2. **AG-UI middleware accepts two new options:** `spanBuffer` and `redactPaths`. When `spanBuffer` is provided, the middleware synthesizes one `function_call` span per tool call. When omitted, behavior is identical to `0.2.x`.
+3. **Span transport.** When `spanBuffer` is wired, the synthesized `function_call` span now ships to openbox-core as a **sibling `ActivityStarted`-shaped event** (`hook_trigger: true`, `hook_stage: "completed"`, `activity_type: "function_call"`) emitted immediately after the original `ActivityCompleted`. The two events share the same `activity_id` so openbox-core ties them together at the session UI. This pattern mirrors how `@openbox-ai/openbox-mastra-sdk` ships its HTTP/DB hook spans — openbox-core's `ActivityCompleted` schema currently rejects an inline `spans` field, so the hook-event side channel is the validated transport path. The buffer write is preserved — local-debug consumers (e.g. the `/api/debug/openbox-spans` route below) still drain via the buffer. Consumers that do **not** wire a `spanBuffer` see no new events.
+
+   Before (buffer-only):
+
+   ```jsonc
+   // Wire events on the run
+   { "event_type": "ActivityCompleted", "activity_id": "call_1", "activity_type": "weatherTool" }
+   // (no second event — spans never reached openbox-core)
+   ```
+
+   After (sibling hook event when buffer wired):
+
+   ```jsonc
+   { "event_type": "ActivityCompleted", "activity_id": "call_1", "activity_type": "weatherTool" }
+   { "event_type": "ActivityStarted", "activity_id": "call_1",
+     "activity_type": "function_call",
+     "hook_trigger": true,
+     "attempt": 1,
+     "spans": [{
+       "name": "tool:weatherTool",
+       "span_id": "...", "trace_id": "...",
+       "start_time": 1750000000000000000,
+       "end_time":   1750000000123000000,
+       "duration_ns": 123000000,
+       "status": { "code": "OK" },
+       "stage": "completed",
+       "kind": "INTERNAL",
+       "semantic_type": "function_call",
+       "hook_type": "function_call",
+       "function": "weatherTool",
+       "events": [],
+       "attributes": { "tool.name": "weatherTool", "tool.call_id": "call_1", "openbox.enforcement_owner": "openbox-copilotkit", "...": "..." }
+     }]
+   }
+   ```
+
+   The wire shape is taken from `openbox-core/internal/content/governance.go:SpanData` and mirrors what `openbox-mastra-sdk`'s `createHookSpan` produces. Notable transforms vs the internal `SpanData` type (`@openbox-ai/openbox-copilotkit`'s `SpanData` export, kept stable so `SpanBuffer` consumers are unaffected): `start_time_unix_nano` (bigint) → `start_time` (JSON number); `end_time_unix_nano` (bigint) → `end_time` (JSON number); `status: "ok"|"error"` (string) → `status: { code: "OK"|"ERROR" }` (struct). Top-level `semantic_type`, `hook_type`, `kind`, `events: []` are added because openbox-core's Go schema requires them at the top level (not inside `attributes`). Timestamps ship as JSON numbers because openbox-core unmarshals them into `int64` (it rejects strings). The hook event omits `activity_output` (rejected on `ActivityStarted` by openbox-core).
+
+   Span timestamps (`start_time_unix_nano` / `end_time_unix_nano`) are coerced to OTel-JSON decimal strings on the wire so the payload remains JSON-serializable. The `SpanBuffer` keeps the raw `bigint` shape.
+
+### Recommended setup
+
+1. **Add a module-singleton `SpanBuffer`** so dev hot-reload doesn't blow it away each iteration:
+
+   ```ts
+   // src/lib/openbox-span-buffer.ts
+   import { SpanBuffer } from "@openbox-ai/openbox-copilotkit";
+   const g = globalThis as unknown as { __openboxSpanBuffer?: SpanBuffer };
+   export const spanBuffer = g.__openboxSpanBuffer ?? new SpanBuffer();
+   if (process.env.NODE_ENV !== "production") g.__openboxSpanBuffer = spanBuffer;
+   ```
+
+2. **Pass it into the middleware** via `withOpenBoxRuntime(..., { middlewareOptions: { spanBuffer, redactPaths: [...] } })`.
+
+3. **Configure `redactPaths`.** The recommended starter set:
+
+   ```ts
+   redactPaths: ["$..password", "$..secret", "$..token", "$..apiKey"]
+   ```
+
+   Supports two JSONPath shapes: leaf-key (`$..name` — redacts every leaf at any depth) and dotted (`$.a.b.name`). Anything else is ignored. **If you leave `redactPaths` empty, args/result previews are not redacted** — tool args of unknown shape may include credentials.
+
+4. **Optional — add a debug route** to inspect the buffer in development:
+
+   ```ts
+   // src/app/api/debug/openbox-spans/route.ts
+   if (process.env.NODE_ENV === "production" || process.env.OPENBOX_DEBUG_SPANS !== "1") {
+     return new NextResponse("Not Found", { status: 404 });
+   }
+   return NextResponse.json(Object.fromEntries(spanBuffer.drain()));
+   ```
+
+   ⚠ **Never expose this in production.** Two gates protect against accidental deploy.
+
+### New env knobs
+
+| Variable | Default | Effect |
+|---|---|---|
+| `OPENBOX_SPAN_BUFFER_MAX_PER_WORKFLOW` | `1000` | Per-workflow span cap; oldest evicted on overflow with an audit signal |
+| `OPENBOX_SPAN_BUFFER_TTL_MS` | `300000` | TTL after which a quiet workflow's spans are evicted |
+| `OPENBOX_DISABLE_SPAN_BUFFER=1` | (off) | Emergency bypass — skip synthesis entirely |
+
+### LLM completion spans
+
+This SDK does **not** wrap `LanguageModelV1` and does **not** emit `llm_completion` spans. If you're using Mastra agents, install [`@openbox-ai/openbox-mastra-sdk`](https://www.npmjs.com/package/@openbox-ai/openbox-mastra-sdk) — its existing `LanguageModelV1` wrap emits LLM spans at the AI SDK seam. The two SDKs co-run without duplicate emission (distinct semantic types, distinct seams).
+
+### Deferred verdict cases
+
+`applyVerdict` ships with `allow` and `block` wired through. `constrain` / `require_approval` / `halt` emit an audit attribute (`openbox.enforcement_status:"late_detection"` or `"halt_requested"`) and throw `VerdictNotImplementedError`. Full enforcement lands at later ship gates:
+
+- `constrain` → `0.4.0`
+- `halt` routing → `0.4.0`
+- approval polling → `0.5.0`
+
+If your code ingests `OpenBoxVerdict` and you want to defer these without an error, catch `VerdictNotImplementedError` at the call site. Audits still flow.
+
+### Rollback
+
+- Code-level: revert the diff that added `spanBuffer` to your middleware options. The buffer holds no persistent state — no migration to undo.
+- Runtime: set `OPENBOX_DISABLE_SPAN_BUFFER=1` to skip synthesis without redeploying. Effect: no spans are appended to the buffer **and** no sibling `ActivityStarted` hook event is emitted — only the original `ActivityCompleted` ships, identical to the pre-`0.3.0-beta.0` wire shape.
+
+## 0.2.0-beta.0 — 2026-06-29
+
+See [`CHANGELOG.md`](./CHANGELOG.md) for the drop-OTel breaking-change list and migration notes.

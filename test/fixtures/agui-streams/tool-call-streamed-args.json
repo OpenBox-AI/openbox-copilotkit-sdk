@@ -1,0 +1,11 @@
+{
+  "note": "Tool args streamed across three deltas, then end + result.",
+  "events": [
+    { "type": "TOOL_CALL_START", "toolCallId": "call-1", "toolCallName": "writeFile" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-1", "delta": "{\"path\":\"/tmp/" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-1", "delta": "x.txt\",\"contents\":\"" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-1", "delta": "hello\"}" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-1" },
+    { "type": "TOOL_CALL_RESULT", "toolCallId": "call-1", "content": "{\"bytes\":5}" }
+  ]
+}

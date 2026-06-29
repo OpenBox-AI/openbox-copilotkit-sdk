@@ -46,17 +46,16 @@ export const { GET, POST } = app;
 ### What `withOpenBoxRuntime` does for you
 
 1. Parses `OpenBoxConfig` (env-var fallbacks honored).
-2. Sets up the OTEL controller (`setupOpenBoxOpenTelemetry`) — idempotent within the process; defers to a peer-registered tracer provider if one already exists.
-3. Constructs an `OpenBoxRuntimeController` and attaches it to the `CopilotRuntime` instance via a private symbol.
-4. Wraps every agent in `runtime.agents` (record / Promise / `(ctx) => agents` factory shapes all handled) with a `Proxy<AbstractAgent>` so:
+2. Constructs an `OpenBoxRuntimeController` and attaches it to the `CopilotRuntime` instance via a private symbol.
+3. Wraps every agent in `runtime.agents` (record / Promise / `(ctx) => agents` factory shapes all handled) with a `Proxy<AbstractAgent>` so:
    - `.clone()` returns a cloned-and-re-wrapped agent (no in-place mutation; two `withOpenBoxRuntime` calls over the same agent record cannot cross-talk).
    - `.use(...)` defers OpenBox middleware install via `queueMicrotask` so it runs INNERMOST relative to A2UI / MCP / OpenGenUI middlewares (observes raw events; correct ordering for governance).
-5. Composes any user-supplied `beforeRequestMiddleware` / `afterRequestMiddleware` in `try/finally` so OpenBox emissions run even when user middleware throws (observability never blind on the error path; user errors propagate AFTER OpenBox records `WorkflowFailed`).
+4. Composes any user-supplied `beforeRequestMiddleware` / `afterRequestMiddleware` in `try/finally` so OpenBox emissions run even when user middleware throws (observability never blind on the error path; user errors propagate AFTER OpenBox records `WorkflowFailed`).
 
 ### Dev vs. prod
 
-- **`next dev`:** the SIGINT handler tends to be cosmetic — Next reloads the module on file change, but the OTEL slot is idempotent within the SDK; a second `withOpenBoxRuntime` call with the same `apiUrl + apiKey` returns the existing controller. A second call with a **different** config throws (see [troubleshooting → setupOpenBoxOpenTelemetry called twice](./troubleshooting.md#7-setupopenboxopentelemetry-called-twice-with-different-configs)).
-- **`next start` / standalone:** wire SIGINT + SIGTERM. `shutdown()` flushes the OTEL span processor and clears the runtime-attached controller; without it you can lose the last batch of telemetry on container stop.
+- **`next dev`:** the SIGINT handler is cosmetic — `shutdown()` is an idempotent no-op resolved promise. Repeat `withOpenBoxRuntime` calls under HMR produce independent controllers; no global state to coordinate as of 0.2.0-beta.0.
+- **`next start` / standalone:** wire SIGINT + SIGTERM if you intend to add client-side cleanup later. Today `shutdown()` resolves immediately; the SDK has no buffered state to flush.
 
 ### Constraint: options-only
 
@@ -84,9 +83,7 @@ import {
 import {
   createOpenBoxMiddleware,
   OpenBoxClient,
-  OpenBoxSpanProcessor,
   parseOpenBoxConfig,
-  setupOpenBoxOpenTelemetry,
 } from "@openbox-ai/openbox-copilotkit";
 import { mastra } from "@/mastra";  // or any AbstractAgent registry
 
@@ -99,16 +96,10 @@ const client = new OpenBoxClient({
   agentDid: cfg.agentDid,
   agentPrivateKey: cfg.agentPrivateKey,
 });
-const spanProcessor = new OpenBoxSpanProcessor({});
-const otelController = setupOpenBoxOpenTelemetry({
-  governanceClient: client,
-  spanProcessor,
-});
 
 // 2. Build the OpenBoxRuntimeController.
 const runtime = {
   client,
-  spanProcessor,
   defaults: {},
   logger: console,
 };
@@ -129,12 +120,6 @@ const copilotRuntime = new CopilotRuntime({ agents });
 const app = createCopilotEndpoint({
   runtime: copilotRuntime,
   basePath: "/api/copilotkit",
-});
-
-// 5. Wire your own shutdown.
-process.on("SIGINT", async () => {
-  await otelController.shutdown();
-  process.exit(0);
 });
 ```
 
@@ -279,4 +264,4 @@ parent  WorkflowCompleted        multi_agent_session_id
 
 - [API reference](./api-reference.md) — full signatures.
 - [Installation](./installation.md) — `next.config.ts` and `.env`.
-- [Troubleshooting](./troubleshooting.md) — common scenarios.
+- [Troubleshooting](./troubleshooting.md) — the common adopter scenarios.
