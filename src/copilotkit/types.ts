@@ -1,4 +1,5 @@
 import type { OpenBoxClient } from "../client/openbox-client.js";
+import type { SpanBuffer } from "../spans/span-buffer.js";
 
 /**
  * Lightweight logger contract. Module-local; matches a console-style surface
@@ -47,6 +48,22 @@ export interface OpenBoxMiddlewareOptions {
   frontendToolNames?: string[];
   isFrontendTool?: (call: { name: string }) => boolean;
   onEvent?: (emission: OpenBoxEmission) => void;
+  /**
+   * Optional external `SpanBuffer` instance. When provided, the middleware
+   * synthesizes one `function_call` span per tool call at activity-completed
+   * time and appends it to this buffer. When absent, the middleware skips
+   * synthesis (Phase 3's example demo lifts the buffer to a module singleton
+   * and passes it in here).
+   *
+   * Env override `OPENBOX_DISABLE_SPAN_BUFFER=1` skips synthesis regardless
+   * of whether a buffer was provided.
+   */
+  spanBuffer?: SpanBuffer;
+  /**
+   * Optional JSONPath-like paths to redact from tool args/result previews.
+   * Recommended starter set: `["$..password", "$..secret", "$..token", "$..apiKey"]`.
+   */
+  redactPaths?: string[];
 }
 
 /**

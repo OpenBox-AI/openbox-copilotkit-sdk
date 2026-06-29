@@ -7,7 +7,13 @@ import {
 } from "@ag-ui/client";
 import { Observable } from "rxjs";
 
+import { attachAuditEnvelope } from "../audit/audit-envelope.js";
 import { getOpenBoxExecutionContext } from "../governance/context.js";
+import { readSpanBufferEnv, type SpanBuffer } from "../spans/span-buffer.js";
+import {
+  synthesizeToolSpan,
+  type ToolCallArgsEventLike
+} from "../spans/tool-span-synthesizer.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { Verdict } from "../types/verdict.js";
 
@@ -41,9 +47,11 @@ interface ToolCallBufferEntry {
   activityArgs?: unknown;
   activityStarted: boolean;
   args: string;
+  argsDeltas: ToolCallArgsEventLike[];
   completed: boolean;
   endTime?: number;
   frontend: boolean;
+  lastVerdict?: GovernanceVerdictResponse | null;
   startTime: number;
   toolName: string;
 }
@@ -80,7 +88,10 @@ export class OpenBoxMiddleware extends Middleware {
     | ((call: { name: string }) => boolean)
     | undefined;
   readonly #logger: OpenBoxRuntimeController["logger"];
+  readonly #redactPaths: string[] | undefined;
   readonly #runtime: OpenBoxRuntimeController;
+  readonly #spanBuffer: SpanBuffer | undefined;
+  readonly #spanSynthesisDisabled: boolean;
 
   public constructor(
     runtime: OpenBoxRuntimeController,
@@ -93,6 +104,9 @@ export class OpenBoxMiddleware extends Middleware {
     this.#enforceApprovals = opts.enforceApprovals === true;
     this.#frontendToolNames = opts.frontendToolNames;
     this.#isFrontendTool = opts.isFrontendTool;
+    this.#redactPaths = opts.redactPaths;
+    this.#spanBuffer = opts.spanBuffer;
+    this.#spanSynthesisDisabled = readSpanBufferEnv().disabled;
   }
 
   public override run(
@@ -263,6 +277,7 @@ export class OpenBoxMiddleware extends Middleware {
         state.toolCallBuffer.set(toolCall.toolCallId, {
           activityStarted: false,
           args: "",
+          argsDeltas: [],
           completed: false,
           frontend,
           startTime: Date.now(),
@@ -279,6 +294,10 @@ export class OpenBoxMiddleware extends Middleware {
         const entry = state.toolCallBuffer.get(argsEvent.toolCallId);
         if (entry) {
           entry.args += argsEvent.delta;
+          entry.argsDeltas.push({
+            delta: argsEvent.delta,
+            toolCallId: argsEvent.toolCallId
+          });
         }
         return undefined;
       }
@@ -460,6 +479,7 @@ export class OpenBoxMiddleware extends Middleware {
       workflowId: state.workflowId
     });
     entry.activityStarted = true;
+    entry.lastVerdict = verdict;
     if (this.#enforceApprovals && shouldBlock(verdict)) {
       return createGovernanceBlockedErrorEvent(resolveCorrelationId(verdict));
     }
@@ -501,7 +521,80 @@ export class OpenBoxMiddleware extends Middleware {
       toolName: entry.toolName,
       workflowId: state.workflowId
     });
+    this.#synthesizeToolSpanIfWired({
+      activityId,
+      activityOutput,
+      endTime,
+      entry,
+      state,
+      status
+    });
     entry.completed = true;
+  }
+
+  #synthesizeToolSpanIfWired({
+    activityId,
+    activityOutput,
+    endTime,
+    entry,
+    state,
+    status
+  }: {
+    activityId: string;
+    activityOutput?: unknown;
+    endTime: number;
+    entry: ToolCallBufferEntry;
+    state: PerRunState;
+    status: "completed" | "failed" | "aborted";
+  }): void {
+    if (this.#spanSynthesisDisabled || !this.#spanBuffer) {
+      return;
+    }
+    try {
+      const span = synthesizeToolSpan(
+        {
+          activityId,
+          args: entry.argsDeltas,
+          attempt: 0,
+          end: {
+            toolCallId: activityId,
+            ...(activityOutput !== undefined ? { result: activityOutput } : {})
+          },
+          endTimeUnixNano: BigInt(endTime) * 1_000_000n,
+          runId: state.runId,
+          start: {
+            toolCallId: activityId,
+            toolCallName: entry.toolName
+          },
+          startTimeUnixNano: BigInt(entry.startTime) * 1_000_000n,
+          workflowId: state.workflowId
+        },
+        {
+          isError: status !== "completed",
+          ...(this.#redactPaths ? { redactPaths: this.#redactPaths } : {})
+        }
+      );
+
+      attachAuditEnvelope(span, {
+        activityId,
+        attempt: 0,
+        enforcementStatus: "pre_execution_allowed",
+        gateway: "agui_event",
+        ...(entry.lastVerdict?.policyId
+          ? { policyVersion: entry.lastVerdict.policyId }
+          : {}),
+        runId: state.runId,
+        workflowId: state.workflowId
+      });
+
+      this.#spanBuffer.append(state.workflowId, span);
+    } catch (err) {
+      this.#logger.warn?.({
+        err,
+        note: "openbox tool-span synthesis failed",
+        workflow_id: state.workflowId
+      });
+    }
   }
 
   async #emitWorkflowFailedFromError(

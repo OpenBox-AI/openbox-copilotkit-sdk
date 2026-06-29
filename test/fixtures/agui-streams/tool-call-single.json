@@ -1,0 +1,9 @@
+{
+  "note": "Single tool call with one args delta and a result event.",
+  "events": [
+    { "type": "TOOL_CALL_START", "toolCallId": "call-1", "toolCallName": "setThemeColor" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-1", "delta": "{\"color\":\"blue\"}" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-1" },
+    { "type": "TOOL_CALL_RESULT", "toolCallId": "call-1", "content": "{\"ok\":true}" }
+  ]
+}

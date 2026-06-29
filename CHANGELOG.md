@@ -1,5 +1,30 @@
 # Changelog
 
+## Unreleased
+
+### Added — verdict surface (Phase 1)
+
+- `OpenBoxVerdict` 5-case discriminated union (`allow` / `constrain` / `require_approval` / `block` / `halt`) under `src/verdict/`. Companion zod schema `OpenBoxVerdictSchema`.
+- `mapVerdict(response, options?)` — single translation point from `GovernanceVerdictResponse` to `OpenBoxVerdict`. Permissive on missing optional fields, strict on shape mismatch (throws `VerdictMappingError`). `strictMode` opt-in turns unknown actions into errors instead of safe-block fallback.
+- `applyVerdict(verdict, ctx)` — single enforcement point. `allow` and `block` are wired; `constrain`, `require_approval`, and `halt` audit then throw `VerdictNotImplementedError` (later ship gates: 0.4.0 / 0.5.0).
+- Public types `ApplierContext`, `ApplierEvent`, `ApplierGateway`, `ApplierSubject`, `ApplierResult`, `OpenBoxConstraint`, `OpenBoxReplacement`, `OpenBoxHaltVerdict`, `OpenBoxRequireApprovalVerdict`.
+- Test matrix: 18 wire-shape fixtures under `test/fixtures/governance-verdict-responses/` cover the (action × field-permutation) grid.
+
+### Added — span foundation (Phase 2)
+
+- `SpanBuffer` — bounded, per-workflow in-memory buffer (`Map<workflowId, SpanData[]>`) with FIFO overflow eviction + TTL eviction. Configurable via constructor opts or env (`OPENBOX_SPAN_BUFFER_MAX_PER_WORKFLOW`, default 1000; `OPENBOX_SPAN_BUFFER_TTL_MS`, default 300000). Plain TS — not an OTel `SpanProcessor`; the drop-OTel posture is preserved.
+- `synthesizeToolSpan(triple, opts?)` — pure synthesizer that converts AG-UI `TOOL_CALL_*` event triples into `SpanData` with `openbox.semantic_type:"function_call"`, `tool.name`, `tool.args_hash`, redacted `tool.args_preview` (<= 256 bytes), `tool.result_hash`, `tool.duration_ms`. Optional `redactPaths` (leaf-key `$..key` and dotted `$.a.b.key` shapes) protect args/result previews.
+- `attachAuditEnvelope(span, envelope)` — mutates a span in place to add the locked audit-envelope attribute set (`openbox.enforcement_owner`, `openbox.gateway`, `openbox.enforcement_status`, `openbox.idempotency_key`, `openbox.policy_version`, `openbox.trace_id`).
+- `idempotencyKey({workflowId, runId, activityId, attempt})` — sha256(workflowId:runId:activityId:attempt). Cross-impl parity with `@openbox-ai/openbox-mastra-sdk` and Core's `setApprovalCache` fingerprint, validated by a golden test.
+- AG-UI middleware now accepts `spanBuffer?: SpanBuffer` and `redactPaths?: string[]`. When `spanBuffer` is provided, the middleware synthesizes one `function_call` span per tool call at activity-completed time and appends it to the buffer. When absent, no spans are produced (no behavior change at the AG-UI middleware boundary).
+- New env knob `OPENBOX_DISABLE_SPAN_BUFFER=1` skips synthesis entirely (emergency bypass).
+- Test fixtures: 4 recorded AG-UI streams under `test/fixtures/agui-streams/` (single tool call, parallel tool calls, streamed args, end-without-result).
+
+### Notes
+
+- Additive only — the existing `Verdict` string-enum, `GovernanceVerdictResponse` class, and AG-UI emitter fanout stay unchanged. No call sites in middleware or emitter are altered by this slice; the applier is exercised by tests + the example demo wiring (Phase 3).
+- LLM completion spans remain out of scope for this SDK. `@openbox-ai/openbox-mastra-sdk` owns the `llm_completion` seam; this SDK does not import from `ai` and has no `LanguageModelV1` wrap.
+
 ## 0.2.0-beta.0 — 2026-06-29
 
 ### Breaking

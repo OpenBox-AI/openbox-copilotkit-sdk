@@ -1,0 +1,8 @@
+{
+  "note": "Tool call ends without a result event (run aborted) — synthesized at run-finished flush.",
+  "events": [
+    { "type": "TOOL_CALL_START", "toolCallId": "call-1", "toolCallName": "callApi" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-1", "delta": "{\"endpoint\":\"/v1\"}" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-1" }
+  ]
+}
