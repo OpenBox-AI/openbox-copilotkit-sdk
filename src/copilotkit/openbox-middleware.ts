@@ -93,8 +93,7 @@ interface PerRunState {
  * error frame (via `governance-blocked-error.ts`) into the observable.
  *
  * `frontendToolNames` / `isFrontendTool` are the explicit allowlist for
- * labelling a tool call `frontend: true` (see plan risk H1 — multi-framework
- * runtimes cannot be inferred from observed `TOOL_CALL_*` alone).
+ * labelling a tool call `frontend: true`.
  */
 export class OpenBoxMiddleware extends Middleware {
   // Lazily-built OpenBoxClients scoped to each child agent's identity, keyed by
@@ -137,7 +136,7 @@ export class OpenBoxMiddleware extends Middleware {
       opts.multiAgent?.parentAgentDid ?? runtime.client.agentDid;
 
     // Fail fast: multi-agent mode needs a parent DID to populate
-    // `from_agent_did` on the Handoff. Without it Core would reject the marker.
+    // `from_agent_did` on the Handoff. Without it OpenBox rejects the marker.
     if (this.#multiAgentEnabled && !this.#parentAgentDid) {
       throw new OpenBoxConfigError(
         "OpenBox multi-agent mode is enabled but no parent agent DID is available. " +
@@ -304,7 +303,7 @@ export class OpenBoxMiddleware extends Middleware {
             goal,
             metadata,
             multiAgentSessionId: state.multiAgentSessionId,
-            // In multi-agent mode the signal is array-shaped for the backend
+            // In multi-agent mode the signal is array-shaped for the OpenBox
             // timeline; pass the user's text so element 0 renders cleanly
             // instead of a JSON-stringified message object.
             payload: state.multiAgentSessionId
@@ -718,7 +717,7 @@ export class OpenBoxMiddleware extends Middleware {
     if (typeof configured === "string" && configured.length > 0) {
       return configured;
     }
-    // Prefixed default so the value is not mistaken for a Temporal run id.
+    // Prefix the default so it is distinguishable from raw provider run ids.
     return `mas:${runId}`;
   }
 
@@ -901,11 +900,7 @@ export class OpenBoxMiddleware extends Middleware {
   }
 }
 
-/**
- * Factory for the AG-UI middleware. Required to expose the controller surface
- * without leaking the class itself (matches the public-API restriction in
- * the plan's acceptance criteria).
- */
+/** Factory for the AG-UI middleware. */
 export function createOpenBoxMiddleware(
   runtime: OpenBoxRuntimeController,
   opts: OpenBoxMiddlewareOptions = {}

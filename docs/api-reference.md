@@ -82,7 +82,7 @@ interface OpenBoxMiddlewareOptions {
 
 - `runtime` — an `OpenBoxRuntimeController` (`{ client, defaults, logger }`). Pattern 1 builds this for you; Pattern 2 builds it by hand.
 - `opts.enforceApprovals` — default `false` (telemetry-only). When `true`, the middleware awaits `client.evaluate` + `client.pollApproval` once a tool call's args are complete, before emitting the OpenBox `ActivityStarted` record. A block/halt verdict halts the stream and emits a redacted `governance_blocked` envelope (see below).
-- `opts.frontendToolNames` — explicit allowlist of tool names that should record `frontend: true`. Without this (or `isFrontendTool`), every observed tool call records `frontend: false`, `tool_origin: "copilotkit-observed"` — safe default for non-Mastra backends (LangGraph / CrewAI / BuiltIn).
+- `opts.frontendToolNames` — explicit allowlist of tool names that should record `frontend: true`. Without this (or `isFrontendTool`), every observed tool call records `frontend: false`, `tool_origin: "copilotkit-observed"` — safe default for backend-routed tools.
 - `opts.isFrontendTool` — alternative callback form. Wins over `frontendToolNames` if both are set.
 - `opts.onEvent` — fired for every emission with `{ activityId?, eventType, payload, workflowId }`. Optional sink for sidecar telemetry pipelines.
 - `opts.multiAgent` — opt into multi-agent grouping. Default disabled. When `enabled`, every event carries a shared `multi_agent_session_id` (default `mas:${runId}`), timeline signals switch to backend-compatible array shape, and a configured delegation tool emits a `Handoff` (`WorkflowEventType.HANDOFF`) marking the parent → child edge. `forwardContext(ctx)` bridges the grouping context to the child runtime. See [Multi-agent delegation](./integration-patterns.md#multi-agent-delegation-handoff) for the identity model, `handoffTools` / `resolveHandoff` / `forwardContext`, and parent-side vs context-export emission.
@@ -123,9 +123,9 @@ This envelope is the **only** wire-format an enforcement block produces — addi
 
 ---
 
-## Copied shared exports
+## Shared OpenBox exports
 
-These come from the shared OpenBox SDK code and are documented inline here so adopters of this SDK do not need to read any sibling repo's docs.
+These exports are documented inline so adopters can wire this SDK without needing any other package documentation.
 
 ### `parseOpenBoxConfig(input?, env?)`
 
@@ -194,7 +194,7 @@ When `agentDid` + `agentPrivateKey` are set, every request signs with five DID i
 - `onApiError: "fail_open" | "fail_closed"` — default `fail_open` (governance failure does not block the user).
 - `governanceTimeout: number` (seconds), `evaluateMaxRetries`, `evaluateRetryBaseDelayMs` — wire-level tuning.
 - `skipActivityTypes`, `skipSignals`, `skipWorkflowTypes`, `skipHitlActivityTypes: Set<string>` — coarse filters; merged from `OPENBOX_SKIP_*` env vars (CSV).
-- `httpCapture: boolean` — default `true`; preserved for shared-schema parity with sibling SDKs. As of 0.2.0-beta.0 this SDK does not capture HTTP/DB/file telemetry — the value is read at config-parse time but has no behavioral effect here.
+- `httpCapture: boolean` — default `true`; reserved for configuration compatibility. As of 0.2.0-beta.0 this SDK does not capture HTTP/DB/file telemetry — the value is read at config-parse time but has no behavioral effect here.
 
 The remaining `OpenBoxConfigInput` fields — `hitlEnabled` (default `true`), `maxEvaluatePayloadBytes` (default `256_000`), `sendActivityStartEvent` (default `true`), `sendStartEvent` (default `true`), `validate` (default `true`, calls `OpenBoxClient.validateApiKey()` at boot) — are stable internal-tuning knobs. Override via the matching `OPENBOX_*` env var or by passing the field to `parseOpenBoxConfig` / `WithOpenBoxRuntimeConfig`. The full schema lives in `src/config/openbox-config.ts`.
 
@@ -238,13 +238,14 @@ Body size is capped (default 10 MiB) to prevent signature-amplification DoS.
 
 ---
 
-## Deferred (T1)
+## Future Reference Pages
 
-These pages are **not shipped in 0.1.0-beta.0** by design:
+These topics are currently covered in the main docs and can split into
+dedicated pages as the public surface grows:
 
 - `architecture.md`, `event-model.md` — content merged into this page (event matrix + emission shape).
 - `approvals-and-guardrails.md` — content merged into `enforceApprovals` section + [troubleshooting](./troubleshooting.md).
-- `security-and-privacy.md` — content merged into [installation security & privacy](./installation.md#security-and-privacy-t0) + DID-signing trust note.
+- `security-and-privacy.md` — content merged into [installation security & privacy](./installation.md#security-and-privacy) + DID-signing trust note.
 - `configuration.md` — content merged into `OpenBoxConfigInput` field reference.
 
 When the public surface grows past two framework exports, these split out.

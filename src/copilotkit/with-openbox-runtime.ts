@@ -24,9 +24,9 @@ import type {
  * Combined configuration object for `withOpenBoxRuntime`. Extends
  * `OpenBoxConfigInput` with the CopilotKit-runtime-specific extras adopters
  * may need to forward into the request-scoped middleware. `logger` and
- * `defaults` are wire-level knobs reserved for advanced operators; the demo
- * exercises only `apiKey`/`apiUrl`/`onApiError`/`agentDid`/`agentPrivateKey`
- * plus `middlewareOptions`.
+ * `defaults` are wire-level knobs reserved for advanced operators; most
+ * integrations only need `apiKey`/`apiUrl`/`onApiError`/`agentDid`/
+ * `agentPrivateKey` plus `middlewareOptions`.
  */
 export interface WithOpenBoxRuntimeConfig extends OpenBoxConfigInput {
   defaults?: OpenBoxRuntimeDefaults;
@@ -46,7 +46,7 @@ const INSTANCE_FORM_MESSAGE =
  * The canonical public adopter entry point. Wraps `CopilotRuntimeOptions` with
  * OpenBox governance + telemetry and constructs the runtime in one call.
  *
- * Adopter footprint (the design north star):
+ * Minimal integration shape:
  *
  *   const { runtime, shutdown } = await withOpenBoxRuntime(opts, cfg);
  *   const app = createCopilotEndpoint({ runtime, basePath: "/api/copilotkit" });

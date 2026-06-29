@@ -14,9 +14,8 @@ export interface OpenBoxLogger {
 }
 
 /**
- * Runtime defaults consulted by emissions when the per-request AsyncLocalStorage
- * execution context is absent. T0 keeps these optional and shallow — Phase 4
- * wraps the request to populate the context for the in-stream path.
+ * Runtime defaults consulted by emissions when the per-request execution
+ * context is absent.
  */
 export interface OpenBoxRuntimeDefaults {
   agentId?: string | undefined;
@@ -24,11 +23,7 @@ export interface OpenBoxRuntimeDefaults {
   workflowType?: string | undefined;
 }
 
-/**
- * Wire-level dependencies attached to an OpenBox-wrapped `CopilotRuntime` via
- * the private `OPENBOX_COPILOTKIT_RUNTIME_SYMBOL`. Phase 6 owns construction;
- * Phase 3 only reads.
- */
+/** Wire-level dependencies attached to an OpenBox-wrapped CopilotRuntime. */
 export interface OpenBoxRuntimeController {
   client: OpenBoxClient;
   defaults: OpenBoxRuntimeDefaults;
@@ -41,7 +36,7 @@ export interface OpenBoxRuntimeController {
  * `frontendToolNames` / `isFrontendTool` are the explicit allowlist required
  * to label a tool call as frontend-originated. Without them, observed tool
  * calls record `frontend: false` and `tool_origin: "copilotkit-observed"`
- * (safe default for multi-framework runtimes — see plan risk H1).
+ * (safe default for multi-framework runtimes).
  *
  * `multiAgent` opts the run into OpenBox multi-agent grouping: it stamps a
  * shared `multi_agent_session_id` on every event and emits a `Handoff` marker
@@ -58,8 +53,7 @@ export interface OpenBoxMiddlewareOptions {
    * Optional external `SpanBuffer` instance. When provided, the middleware
    * synthesizes one `function_call` span per tool call at activity-completed
    * time and appends it to this buffer. When absent, the middleware skips
-   * synthesis (Phase 3's example demo lifts the buffer to a module singleton
-   * and passes it in here).
+   * synthesis.
    *
    * Env override `OPENBOX_DISABLE_SPAN_BUFFER=1` skips synthesis regardless
    * of whether a buffer was provided.
@@ -78,9 +72,8 @@ export interface OpenBoxMiddlewareOptions {
  *
  * Identity model: the CopilotKit runtime and each subagent are DISTINCT
  * OpenBox agents with their own API key + DID. The parent DID becomes the
- * `from_agent_did` on the Handoff; the child agent (the authenticated emitter
- * of the Handoff request) becomes the `to_agent` — Core derives it from the
- * signed request, so the wire never carries `to_agent_did`.
+ * `from_agent_did` on the Handoff, and child credentials identify the
+ * receiving agent.
  */
 export interface OpenBoxMultiAgentOptions {
   /** Master switch. Defaults to `false`. */
@@ -136,7 +129,7 @@ export interface OpenBoxSubagentHandoffConfig {
   childAgentPrivateKey?: string;
   /** Child workflow_type recorded in Handoff metadata (e.g. "weather-agent"). */
   childWorkflowType?: string;
-  /** Child task_queue recorded in Handoff metadata (e.g. "mastra"). */
+  /** Child task_queue recorded in Handoff metadata (for example, "weather"). */
   childTaskQueue?: string;
 }
 

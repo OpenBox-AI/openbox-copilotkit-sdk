@@ -24,10 +24,8 @@ const USER_HEADER = "x-openbox-user-id";
 export interface BeforeRequestMiddlewareParametersLike {
   path: string;
   request: Request;
-  // The v2 runtime instance — typed `unknown` because the SDK does not import
-  // `CopilotRuntimeLike` directly. Phase 5's `wrapCopilotRuntimeOptions`
-  // attaches the OpenBox controller via the private symbol, which is then
-  // resolved by `getOpenBoxRuntime` below.
+  // The runtime instance is typed structurally so this SDK does not depend on
+  // private CopilotKit runtime types.
   runtime: object;
 }
 
@@ -57,13 +55,10 @@ export interface OpenBoxBeforeRequestOptions {
    * Resolve the per-request tenant from a server-trusted source (e.g. a
    * Next.js cookie session, JWT, or mTLS-terminated upstream proxy).
    *
-   * SECURITY: when DID signing is enabled AND Phase 5 composes user-supplied
-   * `beforeRequestMiddleware` before this one, the `x-openbox-tenant-id`
-   * header fallback below would be signed over by the DID flow — meaning a
-   * user middleware could inject any tenant id and the signature would
-   * validate as authentic. Provide `tenantFromRequest` (server-trusted) when
-   * DID signing is enabled. The header path is safe only behind a trusted
-   * upstream proxy that owns the namespace.
+   * SECURITY: when DID signing is enabled, any tenant header present before
+   * signing becomes part of the signed request. Prefer `tenantFromRequest`
+   * with a server-trusted source. The header path is safe only behind a
+   * trusted upstream proxy that owns the namespace.
    */
   tenantFromRequest?: (request: Request) => string | undefined;
   /** SERVER-TRUSTED user resolver. See `tenantFromRequest` warning. */
@@ -77,7 +72,7 @@ export interface OpenBoxBeforeRequestOptions {
  *   2. Opens an `OpenBoxExecutionContext` for the rest of the request via
  *      `enterOpenBoxExecutionContext` (Node-only `AsyncLocalStorage.enterWith`).
  *      The context is visible to any downstream emission in the same async
- *      task — including the AG-UI middleware Phase 3 attaches to the agent.
+ *      task.
  *   3. When DID config is present AND body size is within
  *      `maxSignedBodyBytes`, clones the request body, builds the 5-header DID
  *      envelope, and returns a NEW `Request` with the headers attached.
@@ -175,10 +170,8 @@ export function openBoxBeforeRequest(
     // unconditionally is safe (it's a no-op for non-streaming bodies).
     //
     // `signal` is propagated so client-disconnect cancellation reaches the
-    // downstream agent runner. v2's own `createJsonRequest` follows the same
-    // pattern (`single-route-helpers.ts:76`). Other init fields (cache, mode,
-    // redirect, …) are client-side concerns and intentionally dropped, again
-    // matching v2's rebuild pattern.
+    // downstream agent runner. Client-side init fields such as cache, mode, and
+    // redirect are intentionally dropped when rebuilding the server request.
     const init: RequestInit & { duplex?: "half" } = {
       body: bodyBytes,
       duplex: "half",

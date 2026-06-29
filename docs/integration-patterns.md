@@ -214,7 +214,7 @@ const { runtime, shutdown } = await withOpenBoxRuntime(
 ### Two emission modes
 
 - **Parent-side (child credentials configured):** the SDK signs the `Handoff`
-  request with the child's identity (via a child-scoped client) so Core resolves
+  request with the child's identity (via a child-scoped client) so OpenBox resolves
   `to_agent` correctly. Self-contained — the demo works from CopilotKit alone.
 - **Context-export (no child credentials):** the SDK does **not** send the Handoff
   (it would mis-resolve under the parent identity). Instead it surfaces an
@@ -227,9 +227,8 @@ const { runtime, shutdown } = await withOpenBoxRuntime(
 `multi_agent_session_id` grouping requires **both** sessions to carry the same id.
 CopilotKit (parent) stamps it on its stream and **owns the `Handoff`** (emitted
 parent-side via the child-scoped client above — the child does not emit one, so
-there is no double handoff). The child SDKs (Mastra/CrewAI) already support
-multi-agent flows; they only need the grouping context, which `forwardContext`
-propagates. The child then:
+there is no double handoff). The child runtime only needs the grouping context,
+which `forwardContext` propagates. The child then:
 
 1. stamps the same `multi_agent_session_id` on its `WorkflowStarted` + lifecycle events,
 2. stamps `parent_workflow_id` (from the forwarded context) on its workflow events.
@@ -242,8 +241,8 @@ change is required.
 
 In multi-agent mode the parent emits **array-shaped** `signal_args`
 (`["<text>"]`) for the timeline-visible `user_input` / `agent_output` signals —
-the shape the OpenBox backend timeline already reads — so CopilotKit messages
-render in the run detail with **no backend change**. With multi-agent disabled the
+the shape the OpenBox timeline reads — so CopilotKit messages
+render in the run detail. With multi-agent disabled the
 legacy `{ value }` shape is preserved unchanged.
 
 ### Expected event order (prompt: "what is the weather in tokyo?")

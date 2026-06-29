@@ -1,9 +1,6 @@
 /**
- * SDK-local span shape. Mirrors common OTel attribute-value constraints but
- * has no OpenTelemetry import — the drop-OTel ship gate (0.2.0-beta.0)
- * removed that coupling, and Phase 2 does not revive it. Spans land in a
- * `SpanBuffer` and are drained by consumers (tests + the example demo's
- * gated debug route in Phase 3).
+ * SDK-local span shape. It mirrors common trace attribute-value constraints
+ * without importing a tracing runtime.
  */
 export type AttrValue =
   | boolean

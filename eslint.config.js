@@ -10,6 +10,7 @@ export default tseslint.config(
       "coverage/**",
       "dist/**",
       "eslint.config.js",
+      "demo/**",
       "examples/**",
       "node_modules/**",
       "scripts/**"
@@ -32,23 +33,6 @@ export default tseslint.config(
         { fixStyle: "inline-type-imports" }
       ],
       "@typescript-eslint/no-confusing-void-expression": "error"
-    }
-  },
-  {
-    files: ["src/governance/activity-runtime.ts"],
-    rules: {
-      "@typescript-eslint/no-base-to-string": "off",
-      "@typescript-eslint/no-redundant-type-constituents": "off",
-      "no-unsafe-finally": "off"
-    }
-  },
-  {
-    files: ["src/otel/setup-openbox-opentelemetry.ts"],
-    rules: {
-      "@typescript-eslint/consistent-type-imports": "off",
-      "@typescript-eslint/no-base-to-string": "off",
-      "@typescript-eslint/no-confusing-void-expression": "off",
-      "@typescript-eslint/no-unnecessary-type-assertion": "off"
     }
   },
   {

@@ -1,26 +1,18 @@
 #!/usr/bin/env node
-// Greps target src/ directories for any `@opentelemetry/*` import. Matches
+// Greps SDK source for any `@opentelemetry/*` runtime import. Matches
 // `from "@opentelemetry/..."`, `require("@opentelemetry/...")`, and dynamic
 // `import("@opentelemetry/...")` syntax — pure-prose mentions inside backticked
 // comments do not match. Exits 1 with a list of files+lines if any are found.
 //
-// OTel was removed in 0.2.0-beta.0 (see
-// plans/260629-0501-drop-otel-from-openbox-copilotkit-sdk/). This guard
-// mirrors check-no-mastra-imports.mjs and prevents re-introduction via copy
-// drift from upstream openbox-mastra-sdk.
+// This SDK emits directly through the OpenBox client and must not install a
+// global OpenTelemetry runtime.
 
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join, resolve, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const targets = [
-  "src/config",
-  "src/client",
-  "src/identity",
-  "src/governance",
-  "src/types"
-];
+const targets = ["src"];
 
 const importPatterns = [
   /\bfrom\s+["']@opentelemetry\//,
@@ -59,21 +51,25 @@ for (const t of targets) {
     const lines = content.split("\n");
     lines.forEach((line, idx) => {
       if (importPatterns.some(re => re.test(line))) {
-        hits.push({ file: relative(repoRoot, f), lineNum: idx + 1, line: line.trim() });
+        hits.push({
+          file: relative(repoRoot, f),
+          line: line.trim(),
+          lineNum: idx + 1
+        });
       }
     });
   }
 }
 
 if (hits.length > 0) {
-  console.error("check-no-otel: forbidden @opentelemetry/* imports found in target dirs:");
+  console.error("check-no-otel: forbidden @opentelemetry/* imports found in SDK source:");
   for (const h of hits) {
     console.error(`  ${h.file}:${h.lineNum}  ${h.line}`);
   }
   console.error(
-    "\nOTel was removed in 0.2.0-beta.0. Do not re-introduce. See plans/260629-0501-drop-otel-from-openbox-copilotkit-sdk/."
+    "\nDo not introduce OpenTelemetry runtime imports into this package."
   );
   process.exit(1);
 }
 
-console.log("check-no-otel: OK — zero @opentelemetry/* imports in target dirs.");
+console.log("check-no-otel: OK — zero @opentelemetry/* imports in SDK source.");

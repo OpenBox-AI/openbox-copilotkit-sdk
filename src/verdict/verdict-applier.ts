@@ -4,14 +4,9 @@ import type { ApplierContext, ApplierResult } from "./applier-context.js";
 import type { OpenBoxVerdict } from "./openbox-verdict.js";
 
 /**
- * Thrown by `applyVerdict` for verdict cases that have not yet been wired in
- * this ship gate. Audit attrs are emitted via `ctx.auditEnvelope` BEFORE the
- * throw so the observation survives even when the caller bubbles the error.
- *
- * Cases deferred at 0.3.0-beta.0:
- *  - `constrain` (constrain enforcement is 0.4.0)
- *  - `require_approval` (approval polling is 0.5.0)
- *  - `halt` (halt routing is 0.4.0)
+ * Thrown by `applyVerdict` for verdict cases that are not implemented by this
+ * SDK version. Audit attrs are emitted before the throw so observation
+ * survives even when the caller bubbles the error.
  */
 export class VerdictNotImplementedError extends OpenBoxError {}
 
@@ -61,7 +56,7 @@ export function applyVerdict(
         "openbox.enforcement_status": "late_detection"
       });
       throw new VerdictNotImplementedError(
-        "constrain enforcement is a later ship gate / 0.4.0"
+        "constrain enforcement is not implemented by this SDK version"
       );
     }
 
@@ -72,7 +67,7 @@ export function applyVerdict(
         "openbox.enforcement_status": "late_detection"
       });
       throw new VerdictNotImplementedError(
-        "approval polling is a later ship gate / 0.5.0"
+        "approval polling is not implemented by this SDK version"
       );
     }
 
@@ -86,7 +81,7 @@ export function applyVerdict(
           : {})
       });
       throw new VerdictNotImplementedError(
-        "halt routing is a later ship gate / 0.4.0"
+        "halt routing is not implemented by this SDK version"
       );
     }
 
