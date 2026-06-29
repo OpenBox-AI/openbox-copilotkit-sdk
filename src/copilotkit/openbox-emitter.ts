@@ -58,16 +58,37 @@ export interface ActivityCompletedInput {
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
   runId: string;
-  /**
-   * Optional synthesized spans (e.g. `function_call`) to ship inline on the
-   * `ActivityCompleted` envelope. When present and non-empty the emitter also
-   * sets `hook_trigger: true`, which is the gate `OpenBoxClient` uses to
-   * forward `spans`/`span_count` to openbox-core. When absent the envelope is
-   * byte-identical to the pre-transport (0.3.0-beta.0) shape.
-   */
-  spans?: SpanData[];
   startTime?: number | undefined;
   status: "completed" | "failed" | "aborted";
+  toolName: string;
+  workflowId: string;
+}
+
+/**
+ * Carrier for a synthesized `function_call` span. Emitted as a separate
+ * `ActivityStarted`-shaped event with `hook_trigger: true` and
+ * `hook_stage: "completed"` so it lands on openbox-core via the same
+ * code path that accepts mastra-sdk's hook spans (HTTP/DB instrumentation).
+ *
+ * Background: openbox-core rejects `ActivityCompleted` payloads that carry
+ * a `spans` field (returns 400 invalid request body), so we cannot inline
+ * the span on the original completion event. Posting a sibling event with
+ * the same `activityId` but `activity_type: "function_call"` ties the span
+ * back to the originating tool call without changing the completion shape.
+ */
+export interface ActivityCompletedHookInput {
+  activityArgs?: unknown;
+  activityId: string;
+  activityOutput?: unknown;
+  agentId?: string | undefined;
+  durationMs?: number | undefined;
+  endTime?: number | undefined;
+  frontend: boolean;
+  goal?: string | undefined;
+  metadata?: Record<string, unknown> | undefined;
+  runId: string;
+  span: SpanData;
+  startTime?: number | undefined;
   toolName: string;
   workflowId: string;
 }
@@ -189,8 +210,6 @@ export class OpenBoxCopilotKitEmitter {
   public async emitActivityCompleted(
     input: ActivityCompletedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const hasSpans = Array.isArray(input.spans) && input.spans.length > 0;
-    const wireSpans = hasSpans ? input.spans!.map(serializeSpan) : undefined;
     const payload = withBaseEnvelope({
       activity_id: input.activityId,
       activity_input: serializeActivityInput(input.activityArgs),
@@ -203,10 +222,8 @@ export class OpenBoxCopilotKitEmitter {
       ...(input.error ? { error: input.error } : {}),
       event_type: WorkflowEventType.ACTIVITY_COMPLETED,
       ...(input.goal ? { goal: input.goal } : {}),
-      ...(hasSpans ? { hook_trigger: true } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
       run_id: input.runId,
-      ...(wireSpans ? { spans: wireSpans } : {}),
       ...(typeof input.startTime === "number"
         ? { start_time: input.startTime }
         : {}),
@@ -218,6 +235,52 @@ export class OpenBoxCopilotKitEmitter {
     return this.#evaluate(payload, {
       activityId: input.activityId,
       eventType: WorkflowEventType.ACTIVITY_COMPLETED,
+      workflowId: input.workflowId
+    });
+  }
+
+  /**
+   * Sibling event to `emitActivityCompleted` that carries the synthesized
+   * `function_call` span. Shaped as `ActivityStarted` with
+   * `hook_trigger: true` + `hook_stage: "completed"` so openbox-core's
+   * existing hook-span ingestion path (the one that accepts mastra-sdk's
+   * HTTP/DB hook spans) accepts it. Same `activity_id` as the completion
+   * event but distinct `activity_type: "function_call"` so the two phases
+   * stay tied at the openbox-core UI without collision.
+   */
+  public async emitActivityCompletedHook(
+    input: ActivityCompletedHookInput
+  ): Promise<GovernanceVerdictResponse | null> {
+    const wireSpan = serializeSpan(input.span);
+    const payload = withBaseEnvelope({
+      activity_id: input.activityId,
+      activity_input: serializeActivityInput(input.activityArgs),
+      activity_output: serializeActivityOutput(input.activityOutput),
+      activity_type: "function_call",
+      ...(input.agentId ? { agent_id: input.agentId } : {}),
+      ...(typeof input.durationMs === "number"
+        ? { duration_ms: input.durationMs }
+        : {}),
+      ...(typeof input.endTime === "number" ? { end_time: input.endTime } : {}),
+      event_type: WorkflowEventType.ACTIVITY_STARTED,
+      frontend: input.frontend,
+      ...(input.goal ? { goal: input.goal } : {}),
+      hook_stage: "completed",
+      hook_trigger: true,
+      ...(input.metadata ? { metadata: input.metadata } : {}),
+      run_id: input.runId,
+      spans: [wireSpan],
+      ...(typeof input.startTime === "number"
+        ? { start_time: input.startTime }
+        : {}),
+      tool_name: input.toolName,
+      workflow_id: input.workflowId,
+      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    });
+
+    return this.#evaluate(payload, {
+      activityId: input.activityId,
+      eventType: WorkflowEventType.ACTIVITY_STARTED,
       workflowId: input.workflowId
     });
   }

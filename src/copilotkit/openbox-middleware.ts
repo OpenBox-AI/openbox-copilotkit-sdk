@@ -234,6 +234,7 @@ export class OpenBoxMiddleware extends Middleware {
       await this.#emitActivityCompleted({
         activityId: resultEvent.toolCallId,
         activityOutput: extractToolResultOutput(resultEvent),
+        agentId,
         entry,
         goal,
         metadata,
@@ -438,6 +439,7 @@ export class OpenBoxMiddleware extends Middleware {
       }
       await this.#emitActivityCompleted({
         activityId,
+        agentId,
         entry,
         goal,
         metadata,
@@ -490,6 +492,7 @@ export class OpenBoxMiddleware extends Middleware {
   async #emitActivityCompleted({
     activityId,
     activityOutput,
+    agentId,
     entry,
     goal,
     metadata,
@@ -498,6 +501,7 @@ export class OpenBoxMiddleware extends Middleware {
   }: {
     activityId: string;
     activityOutput?: unknown;
+    agentId?: string | undefined;
     entry: ToolCallBufferEntry;
     goal?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
@@ -525,14 +529,29 @@ export class OpenBoxMiddleware extends Middleware {
       goal,
       metadata,
       runId: state.runId,
-      ...(span ? { spans: [span] } : {}),
       startTime: entry.startTime,
       status,
       toolName: entry.toolName,
       workflowId: state.workflowId
     });
-    if (span && this.#spanBuffer) {
-      this.#spanBuffer.append(state.workflowId, span);
+    if (span) {
+      await this.#emitter.emitActivityCompletedHook({
+        activityArgs: entry.activityArgs,
+        activityId,
+        ...(activityOutput !== undefined ? { activityOutput } : {}),
+        agentId,
+        durationMs: Math.max(0, endTime - entry.startTime),
+        endTime,
+        frontend: entry.frontend,
+        goal,
+        metadata,
+        runId: state.runId,
+        span,
+        startTime: entry.startTime,
+        toolName: entry.toolName,
+        workflowId: state.workflowId
+      });
+      this.#spanBuffer?.append(state.workflowId, span);
     }
     entry.completed = true;
   }

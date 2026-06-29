@@ -8,22 +8,28 @@
 
 1. **New public types** under the package root: `OpenBoxVerdict`, `OpenBoxConstraint`, `OpenBoxReplacement`, `ApplierContext`, `ApplierResult`, `SpanData`, `SpanBuffer`, `EnforcementStatus`, plus the helper functions `mapVerdict`, `applyVerdict`, `synthesizeToolSpan`, `attachAuditEnvelope`, `idempotencyKey`. The existing `Verdict` enum and `GovernanceVerdictResponse` class are **unchanged**.
 2. **AG-UI middleware accepts two new options:** `spanBuffer` and `redactPaths`. When `spanBuffer` is provided, the middleware synthesizes one `function_call` span per tool call. When omitted, behavior is identical to `0.2.x`.
-3. **Span transport.** When `spanBuffer` is wired, the synthesized `function_call` span now ships **inline on the `ActivityCompleted` envelope** (as `payload.spans` + `hook_trigger: true`) so it lands on the corresponding openbox-core session alongside whatever `llm_completion` spans your other SDK emits. The buffer write is preserved — local-debug consumers (e.g. the `/api/debug/openbox-spans` route below) still drain via the buffer. Consumers that do **not** wire a `spanBuffer` see no envelope change (the `spans` / `hook_trigger` keys are omitted; payload shape is byte-identical to `0.3.0-beta.0`'s buffer-only path).
+3. **Span transport.** When `spanBuffer` is wired, the synthesized `function_call` span now ships to openbox-core as a **sibling `ActivityStarted`-shaped event** (`hook_trigger: true`, `hook_stage: "completed"`, `activity_type: "function_call"`) emitted immediately after the original `ActivityCompleted`. The two events share the same `activity_id` so openbox-core ties them together at the session UI. This pattern mirrors how `@openbox-ai/openbox-mastra-sdk` ships its HTTP/DB hook spans — openbox-core's `ActivityCompleted` schema currently rejects an inline `spans` field, so the hook-event side channel is the validated transport path. The buffer write is preserved — local-debug consumers (e.g. the `/api/debug/openbox-spans` route below) still drain via the buffer. Consumers that do **not** wire a `spanBuffer` see no new events.
 
    Before (buffer-only):
 
    ```jsonc
-   // ActivityCompleted on the wire
-   { "event_type": "ActivityCompleted", "activity_id": "...", /* no spans field */ }
+   // Wire events on the run
+   { "event_type": "ActivityCompleted", "activity_id": "call_1", "activity_type": "weatherTool" }
+   // (no second event — spans never reached openbox-core)
    ```
 
-   After (envelope-attached when buffer wired):
+   After (sibling hook event when buffer wired):
 
    ```jsonc
-   { "event_type": "ActivityCompleted", "activity_id": "...",
-     "hook_trigger": true,
+   { "event_type": "ActivityCompleted", "activity_id": "call_1", "activity_type": "weatherTool" }
+   { "event_type": "ActivityStarted", "activity_id": "call_1",
+     "activity_type": "function_call",
+     "hook_trigger": true, "hook_stage": "completed",
+     "tool_name": "weatherTool",
      "spans": [ { "name": "tool:weatherTool", "attributes": { "openbox.semantic_type": "function_call", "...": "..." } } ] }
    ```
+
+   Span timestamps (`start_time_unix_nano` / `end_time_unix_nano`) are coerced to OTel-JSON decimal strings on the wire so the payload remains JSON-serializable. The `SpanBuffer` keeps the raw `bigint` shape.
 
 ### Recommended setup
 
@@ -84,7 +90,7 @@ If your code ingests `OpenBoxVerdict` and you want to defer these without an err
 ### Rollback
 
 - Code-level: revert the diff that added `spanBuffer` to your middleware options. The buffer holds no persistent state — no migration to undo.
-- Runtime: set `OPENBOX_DISABLE_SPAN_BUFFER=1` to skip synthesis without redeploying. Effect: no spans are appended to the buffer **and** no `spans` / `hook_trigger` keys are attached to the `ActivityCompleted` envelope — wire-format reverts to the pre-`0.3.0-beta.0` shape.
+- Runtime: set `OPENBOX_DISABLE_SPAN_BUFFER=1` to skip synthesis without redeploying. Effect: no spans are appended to the buffer **and** no sibling `ActivityStarted` hook event is emitted — only the original `ActivityCompleted` ships, identical to the pre-`0.3.0-beta.0` wire shape.
 
 ## 0.2.0-beta.0 — 2026-06-29
 

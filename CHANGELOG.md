@@ -20,10 +20,12 @@
 - New env knob `OPENBOX_DISABLE_SPAN_BUFFER=1` skips synthesis entirely (emergency bypass).
 - Test fixtures: 4 recorded AG-UI streams under `test/fixtures/agui-streams/` (single tool call, parallel tool calls, streamed args, end-without-result).
 
-### Added — span envelope transport
+### Added — span sibling-event transport
 
-- `function_call` spans now ship inline on the `ActivityCompleted` envelope when a `spanBuffer` is wired (previously buffered locally only). The middleware synthesizes the span before the emit, sets `payload.spans = [span]` + `payload.hook_trigger = true`, then still appends to the buffer for local-debug consumers. When `spanBuffer` is absent or `OPENBOX_DISABLE_SPAN_BUFFER=1`, the envelope is byte-identical to the prior buffer-only path. Synthesis errors are swallowed and logged — the activity event still ships without a `spans` key.
-- `ActivityCompletedInput` now accepts an optional `spans?: SpanData[]` field (additive, opt-in via spread idiom).
+- `function_call` spans now ship to openbox-core when a `spanBuffer` is wired (previously buffered locally only). The middleware synthesizes the span at activity-complete time, emits the original `ActivityCompleted` unchanged, then emits a sibling `ActivityStarted`-shaped hook event (`hook_trigger: true`, `hook_stage: "completed"`, `activity_type: "function_call"`) carrying the span. The same `activity_id` ties the two events together at the openbox-core session UI. This mirrors `openbox-mastra-sdk`'s HTTP/DB hook transport — openbox-core's `ActivityCompleted` schema rejects inline `spans` fields (400 invalid request body), so the hook-event side channel is the validated path.
+- New emitter method `emitActivityCompletedHook(input: ActivityCompletedHookInput)` carries the sibling event.
+- Span nano-time fields (`start_time_unix_nano` / `end_time_unix_nano` / `events[].time_unix_nano`) are coerced to OTel-JSON decimal strings at the wire boundary so the payload is JSON-serializable. The buffer keeps the raw `bigint` shape.
+- When `spanBuffer` is absent or `OPENBOX_DISABLE_SPAN_BUFFER=1`, the sibling hook event is suppressed — wire output is byte-identical to the pre-transport buffer-only path. Synthesis errors are swallowed and logged; the original `ActivityCompleted` still ships and no sibling event is emitted.
 
 ### Notes
 

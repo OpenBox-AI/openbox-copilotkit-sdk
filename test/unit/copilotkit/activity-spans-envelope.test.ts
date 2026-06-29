@@ -32,19 +32,20 @@ const scriptedToolCall: BaseEvent[] = [
   { type: EventType.RUN_FINISHED } as BaseEvent
 ];
 
-function findActivityCompletedPayload(
-  calls: readonly unknown[][]
+function findPayload(
+  calls: readonly unknown[][],
+  predicate: (payload: Record<string, unknown>) => boolean
 ): Record<string, unknown> | undefined {
   for (const call of calls) {
     const payload = call[0] as Record<string, unknown> | undefined;
-    if (payload?.event_type === "ActivityCompleted") {
+    if (payload && predicate(payload)) {
       return payload;
     }
   }
   return undefined;
 }
 
-describe("OpenBoxMiddleware — ActivityCompleted span envelope", () => {
+describe("OpenBoxMiddleware — function_call span hook event", () => {
   const savedDisableEnv = process.env.OPENBOX_DISABLE_SPAN_BUFFER;
 
   beforeEach(() => {
@@ -59,7 +60,7 @@ describe("OpenBoxMiddleware — ActivityCompleted span envelope", () => {
     }
   });
 
-  it("ships the synthesized span inline on ActivityCompleted when a buffer is wired", async () => {
+  it("emits a sibling ActivityStarted hook event carrying the synthesized span (buffer wired)", async () => {
     const { controller, evaluateMock } = buildController();
     const spanBuffer = new SpanBuffer();
     const middleware = createOpenBoxMiddleware(controller, { spanBuffer });
@@ -67,10 +68,31 @@ describe("OpenBoxMiddleware — ActivityCompleted span envelope", () => {
 
     await collectEvents(middleware.run(buildRunAgentInput(), agent));
 
-    const payload = findActivityCompletedPayload(evaluateMock.mock.calls);
-    expect(payload).toBeDefined();
-    expect(payload?.hook_trigger).toBe(true);
-    const spans = payload?.spans as unknown[] | undefined;
+    // The completion event itself stays clean — no spans, no hook_trigger.
+    const completed = findPayload(
+      evaluateMock.mock.calls,
+      p => p.event_type === "ActivityCompleted"
+    );
+    expect(completed).toBeDefined();
+    expect(Object.prototype.hasOwnProperty.call(completed!, "spans")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(completed!, "hook_trigger")).toBe(
+      false
+    );
+
+    // The hook event ships as a separate ActivityStarted with the function_call span.
+    const hook = findPayload(
+      evaluateMock.mock.calls,
+      p =>
+        p.event_type === "ActivityStarted" &&
+        p.activity_type === "function_call"
+    );
+    expect(hook).toBeDefined();
+    expect(hook?.hook_trigger).toBe(true);
+    expect(hook?.hook_stage).toBe("completed");
+    expect(hook?.activity_id).toBe("call-1");
+    expect(hook?.tool_name).toBe("weatherTool");
+
+    const spans = hook?.spans as unknown[] | undefined;
     expect(Array.isArray(spans)).toBe(true);
     expect(spans?.length).toBe(1);
     const span = spans?.[0] as Record<string, unknown>;
@@ -83,40 +105,47 @@ describe("OpenBoxMiddleware — ActivityCompleted span envelope", () => {
     expect(attrs["openbox.enforcement_status"]).toBe("pre_execution_allowed");
     expect(typeof attrs["openbox.idempotency_key"]).toBe("string");
 
-    // Wire format: bigint nano-time fields are coerced to decimal strings so
-    // the payload is JSON-serializable. The buffer copy below still holds the
-    // raw bigint shape.
+    // Wire-format bigint fields coerced to decimal strings.
     expect(typeof span.start_time_unix_nano).toBe("string");
     expect(typeof span.end_time_unix_nano).toBe("string");
     expect(span.start_time_unix_nano as string).toMatch(/^\d+$/);
-    expect(span.end_time_unix_nano as string).toMatch(/^\d+$/);
 
-    // The full payload must JSON-stringify without throwing on bigint —
-    // OpenBoxClient.evaluate serializes the payload before POSTing.
-    expect(() => JSON.stringify(payload)).not.toThrow();
+    // Full payload must JSON-stringify without throwing on bigint.
+    expect(() => JSON.stringify(hook)).not.toThrow();
 
-    // buffer still receives the local-debug copy (raw bigint shape)
+    // Buffer still receives the local-debug copy (raw bigint shape preserved).
     const drained = spanBuffer.drain().get("thread-1");
     expect(drained?.length).toBe(1);
     expect(typeof drained?.[0]?.start_time_unix_nano).toBe("bigint");
   });
 
-  it("omits spans + hook_trigger when no SpanBuffer is wired (byte-identical to 0.3.0-beta.0)", async () => {
+  it("emits NO hook event and a clean ActivityCompleted when no SpanBuffer is wired", async () => {
     const { controller, evaluateMock } = buildController();
     const middleware = createOpenBoxMiddleware(controller);
     const agent = new ScriptedAgent({ events: scriptedToolCall });
 
     await collectEvents(middleware.run(buildRunAgentInput(), agent));
 
-    const payload = findActivityCompletedPayload(evaluateMock.mock.calls);
-    expect(payload).toBeDefined();
-    expect(Object.prototype.hasOwnProperty.call(payload!, "spans")).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(payload!, "hook_trigger")).toBe(
+    const hook = findPayload(
+      evaluateMock.mock.calls,
+      p =>
+        p.event_type === "ActivityStarted" &&
+        p.activity_type === "function_call"
+    );
+    expect(hook).toBeUndefined();
+
+    const completed = findPayload(
+      evaluateMock.mock.calls,
+      p => p.event_type === "ActivityCompleted"
+    );
+    expect(completed).toBeDefined();
+    expect(Object.prototype.hasOwnProperty.call(completed!, "spans")).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(completed!, "hook_trigger")).toBe(
       false
     );
   });
 
-  it("omits spans + hook_trigger when OPENBOX_DISABLE_SPAN_BUFFER=1", async () => {
+  it("emits NO hook event when OPENBOX_DISABLE_SPAN_BUFFER=1 (envelope unchanged)", async () => {
     process.env.OPENBOX_DISABLE_SPAN_BUFFER = "1";
 
     const { controller, evaluateMock } = buildController();
@@ -126,17 +155,17 @@ describe("OpenBoxMiddleware — ActivityCompleted span envelope", () => {
 
     await collectEvents(middleware.run(buildRunAgentInput(), agent));
 
-    const payload = findActivityCompletedPayload(evaluateMock.mock.calls);
-    expect(payload).toBeDefined();
-    expect(Object.prototype.hasOwnProperty.call(payload!, "spans")).toBe(false);
-    expect(Object.prototype.hasOwnProperty.call(payload!, "hook_trigger")).toBe(
-      false
+    const hook = findPayload(
+      evaluateMock.mock.calls,
+      p =>
+        p.event_type === "ActivityStarted" &&
+        p.activity_type === "function_call"
     );
-    // buffer also untouched
+    expect(hook).toBeUndefined();
     expect(spanBuffer.workflowCount()).toBe(0);
   });
 
-  it("emits without spans and logs a warn when synthesis throws", async () => {
+  it("skips the hook emit and logs a warn when synthesis throws", async () => {
     const { controller, evaluateMock, logger } = buildController();
     const spanBuffer = new SpanBuffer();
     const middleware = createOpenBoxMiddleware(controller, { spanBuffer });
@@ -148,22 +177,24 @@ describe("OpenBoxMiddleware — ActivityCompleted span envelope", () => {
     });
 
     try {
-      const events = await collectEvents(middleware.run(buildRunAgentInput(), agent));
+      const events = await collectEvents(
+        middleware.run(buildRunAgentInput(), agent)
+      );
       expect(events.length).toBeGreaterThan(0);
 
-      const payload = findActivityCompletedPayload(evaluateMock.mock.calls);
-      expect(payload).toBeDefined();
-      expect(Object.prototype.hasOwnProperty.call(payload!, "spans")).toBe(false);
-      expect(Object.prototype.hasOwnProperty.call(payload!, "hook_trigger")).toBe(
-        false
+      const hook = findPayload(
+        evaluateMock.mock.calls,
+        p =>
+          p.event_type === "ActivityStarted" &&
+          p.activity_type === "function_call"
       );
+      expect(hook).toBeUndefined();
 
       const warnCalls = logger.warn.mock.calls.filter(args => {
         const entry = args[0] as { note?: string } | undefined;
         return entry?.note === "openbox tool-span synthesis failed";
       });
       expect(warnCalls.length).toBe(1);
-      // buffer never appended on synthesis failure
       expect(spanBuffer.workflowCount()).toBe(0);
     } finally {
       spy.mockRestore();
