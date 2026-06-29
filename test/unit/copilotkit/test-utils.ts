@@ -8,7 +8,6 @@ import { EMPTY, Observable } from "rxjs";
 import { vi, type Mock } from "vitest";
 
 import { OpenBoxClient } from "../../../src/client/openbox-client.js";
-import { OpenBoxSpanProcessor } from "../../../src/span/openbox-span-processor.js";
 import type {
   OpenBoxLogger,
   OpenBoxRuntimeController
@@ -95,13 +94,11 @@ export function buildController(
   (client as unknown as { evaluate: Mock }).evaluate = evaluateMock;
   (client as unknown as { pollApproval: Mock }).pollApproval = pollApprovalMock;
 
-  const spanProcessor = new OpenBoxSpanProcessor();
   const logger: OpenBoxLogger & { warn: Mock } = { warn: vi.fn() };
   const controller: OpenBoxRuntimeController = {
     client,
     defaults: { agentId: "test-agent", workflowType: "copilotkit" },
-    logger,
-    spanProcessor
+    logger
   };
 
   return { controller, evaluateMock, logger, pollApprovalMock };

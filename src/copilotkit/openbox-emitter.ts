@@ -1,8 +1,6 @@
 import type { OpenBoxClient } from "../client/openbox-client.js";
-import type { OpenBoxSpanProcessor } from "../span/openbox-span-processor.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { WorkflowEventType } from "../types/workflow-event-type.js";
-import { WorkflowSpanBuffer } from "../types/workflow-span-buffer.js";
 
 import type {
   OpenBoxEmission,
@@ -85,14 +83,13 @@ export interface WorkflowFailedInput {
 }
 
 /**
- * Wraps `client.evaluate` + `OpenBoxSpanProcessor` registrations for every
- * CopilotKit-observed AG-UI event. Each emit method:
+ * Wraps `client.evaluate` for every CopilotKit-observed AG-UI event. Each
+ * emit method:
  *
- *   1. Registers the workflow / trace with the span processor when needed.
- *   2. Builds a payload shape mirroring `openbox-mastra-sdk/src/mastra/wrap-agent.ts:2031-2074`.
- *   3. Awaits `client.evaluate(payload)` so the optional `enforceApprovals`
+ *   1. Builds a payload shape mirroring `openbox-mastra-sdk/src/mastra/wrap-agent.ts:2031-2074`.
+ *   2. Awaits `client.evaluate(payload)` so the optional `enforceApprovals`
  *      caller can inspect the verdict.
- *   4. On error: logs via `runtime.logger.warn` and swallows (fail-open). The
+ *   3. On error: logs via `runtime.logger.warn` and swallows (fail-open). The
  *      observable stream never errors from emitter failures.
  *
  * Verdict objects are returned to the caller so the middleware can decide
@@ -102,15 +99,12 @@ export class OpenBoxCopilotKitEmitter {
   readonly #client: OpenBoxClient;
   readonly #logger: OpenBoxRuntimeController["logger"];
   readonly #onEvent: OpenBoxMiddlewareOptions["onEvent"];
-  readonly #registeredWorkflows = new Set<string>();
-  readonly #spanProcessor: OpenBoxSpanProcessor;
 
   public constructor(
     runtime: OpenBoxRuntimeController,
     onEvent: OpenBoxMiddlewareOptions["onEvent"]
   ) {
     this.#client = runtime.client;
-    this.#spanProcessor = runtime.spanProcessor;
     this.#logger = runtime.logger;
     this.#onEvent = onEvent;
   }
@@ -118,8 +112,6 @@ export class OpenBoxCopilotKitEmitter {
   public async emitWorkflowStarted(
     input: WorkflowStartedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    this.#ensureWorkflowRegistered(input.workflowId, input.runId);
-
     const payload = withBaseEnvelope({
       event_type: WorkflowEventType.WORKFLOW_STARTED,
       ...(input.goal ? { goal: input.goal } : {}),
@@ -304,25 +296,6 @@ export class OpenBoxCopilotKitEmitter {
         workflow_id: emissionMeta.workflowId
       });
     }
-  }
-
-  #ensureWorkflowRegistered(workflowId: string, runId: string): void {
-    const runKey = `${workflowId}::${runId}`;
-
-    if (this.#registeredWorkflows.has(runKey)) {
-      return;
-    }
-
-    this.#registeredWorkflows.add(runKey);
-    this.#spanProcessor.registerWorkflow(
-      workflowId,
-      new WorkflowSpanBuffer({
-        runId,
-        taskQueue: COPILOTKIT_TASK_QUEUE,
-        workflowId,
-        workflowType: COPILOTKIT_WORKFLOW_TYPE
-      })
-    );
   }
 
 }

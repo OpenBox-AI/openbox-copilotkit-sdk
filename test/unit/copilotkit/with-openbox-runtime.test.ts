@@ -7,19 +7,7 @@ import { CopilotRuntime } from "@copilotkit/runtime/v2";
 import { EMPTY, Observable } from "rxjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../src/otel/setup-openbox-opentelemetry.js", () => ({
-  setupOpenBoxOpenTelemetry: vi.fn(() => ({
-    instrumentations: [],
-    shutdown: vi.fn(async () => {}),
-    tracerProvider: {}
-  }))
-}));
-
-import { setupOpenBoxOpenTelemetry } from "../../../src/otel/setup-openbox-opentelemetry.js";
-import {
-  OPENBOX_COPILOTKIT_RUNTIME_SYMBOL,
-  getOpenBoxRuntime
-} from "../../../src/copilotkit/runtime-symbol.js";
+import { getOpenBoxRuntime } from "../../../src/copilotkit/runtime-symbol.js";
 import type { OpenBoxRuntimeController } from "../../../src/copilotkit/types.js";
 import { withOpenBoxRuntime } from "../../../src/copilotkit/with-openbox-runtime.js";
 
@@ -76,7 +64,7 @@ describe("withOpenBoxRuntime — tuple-return shape", () => {
     const attached = getOpenBoxRuntime<OpenBoxRuntimeController>(runtime);
     expect(attached).toBeDefined();
     expect(attached?.client).toBeDefined();
-    expect(attached?.spanProcessor).toBeDefined();
+    expect(attached?.logger).toBeDefined();
 
     await shutdown();
   });
@@ -127,12 +115,8 @@ describe("withOpenBoxRuntime — instance-form guard", () => {
   });
 });
 
-describe("withOpenBoxRuntime — OTEL self-call dedup across two wraps", () => {
-  it("calls setupOpenBoxOpenTelemetry once per wrap call and reuses the mocked controller's shutdown idempotently across both", async () => {
-    const otelMock = setupOpenBoxOpenTelemetry as unknown as ReturnType<
-      typeof vi.fn
-    >;
-
+describe("withOpenBoxRuntime — concurrent independent wraps", () => {
+  it("produces distinct runtime + controller instances and idempotent per-wrap shutdowns", async () => {
     const first = await withOpenBoxRuntime(
       { agents: { support: new FakeAgent("support") } },
       CONFIG
@@ -143,18 +127,13 @@ describe("withOpenBoxRuntime — OTEL self-call dedup across two wraps", () => {
     );
 
     expect(first.runtime).not.toBe(second.runtime);
-    // Two wraps → two distinct controller objects under the private symbol.
     expect(getOpenBoxRuntime(first.runtime)).not.toBe(
       getOpenBoxRuntime(second.runtime)
     );
-    // setupOpenBoxOpenTelemetry is invoked once per wrap; Phase 2's
-    // module-private dedup is what makes the second call return the same
-    // controller in production. The mock returns a fresh object each call,
-    // so here we only assert that wrap delegated to it twice (no skip path
-    // inside withOpenBoxRuntime itself).
-    expect(otelMock).toHaveBeenCalledTimes(2);
 
     await first.shutdown();
+    await first.shutdown();
+    await second.shutdown();
     await second.shutdown();
   });
 });

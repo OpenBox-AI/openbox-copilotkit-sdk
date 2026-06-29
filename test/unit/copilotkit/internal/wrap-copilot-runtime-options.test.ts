@@ -5,17 +5,8 @@ import {
   type RunAgentInput
 } from "@ag-ui/client";
 import { EMPTY, Observable } from "rxjs";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../../src/otel/setup-openbox-opentelemetry.js", () => ({
-  setupOpenBoxOpenTelemetry: vi.fn(() => ({
-    instrumentations: [],
-    shutdown: vi.fn(async () => {}),
-    tracerProvider: {}
-  }))
-}));
-
-import { setupOpenBoxOpenTelemetry } from "../../../../src/otel/setup-openbox-opentelemetry.js";
 import {
   wrapCopilotRuntimeOptions,
   type CopilotRuntimeOptionsLike
@@ -129,29 +120,17 @@ describe("wrapCopilotRuntimeOptions — agents shapes", () => {
 });
 
 describe("wrapCopilotRuntimeOptions — controller + shutdown", () => {
-  it("returns a controller with a real client + span processor + logger and an idempotent shutdown", async () => {
+  it("returns a controller with a real client + logger and an idempotent no-op shutdown", async () => {
     const { controller, shutdown } = await wrapCopilotRuntimeOptions(
       { agents: { a: new FakeAgent("a") } },
       CONFIG
     );
 
     expect(controller.client).toBeDefined();
-    expect(controller.spanProcessor).toBeDefined();
     expect(controller.logger).toBeDefined();
 
-    const otelMock = setupOpenBoxOpenTelemetry as unknown as ReturnType<
-      typeof vi.fn
-    >;
-    expect(otelMock).toHaveBeenCalledTimes(1);
-    const otelControllerResult = otelMock.mock.results[0]!.value as {
-      shutdown: ReturnType<typeof vi.fn>;
-    };
-
-    await shutdown();
-    await shutdown();
-    // Wrap caches the shutdown promise so the underlying OTEL shutdown only
-    // fires once even when adopters/SIGINT trigger shutdown twice.
-    expect(otelControllerResult.shutdown).toHaveBeenCalledTimes(1);
+    await expect(shutdown()).resolves.toBeUndefined();
+    await expect(shutdown()).resolves.toBeUndefined();
   });
 
   it("forwards an adopter-supplied logger and defaults onto the controller", async () => {

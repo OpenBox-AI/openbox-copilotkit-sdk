@@ -1,5 +1,4 @@
 import type { OpenBoxClient } from "../client/openbox-client.js";
-import type { OpenBoxSpanProcessor } from "../span/openbox-span-processor.js";
 
 /**
  * Lightweight logger contract. Module-local; matches a console-style surface
@@ -33,7 +32,6 @@ export interface OpenBoxRuntimeController {
   client: OpenBoxClient;
   defaults: OpenBoxRuntimeDefaults;
   logger: OpenBoxLogger;
-  spanProcessor: OpenBoxSpanProcessor;
 }
 
 /**

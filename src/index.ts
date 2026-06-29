@@ -3,6 +3,4 @@ export * from "./config/index.js";
 export * from "./copilotkit/index.js";
 export * from "./governance/index.js";
 export * from "./identity/index.js";
-export * from "./otel/index.js";
-export * from "./span/index.js";
 export * from "./types/index.js";
