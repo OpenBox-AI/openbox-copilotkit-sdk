@@ -7,7 +7,7 @@
 
 Server-only governance and observability SDK for [CopilotKit](https://www.copilotkit.ai/) `runtime/v2`. Attaches at the CopilotKit boundary to observe frontend tools, AG-UI final messages, and HITL approvals — the seams a per-framework SDK can't see.
 
-> **Beta.** Public APIs may change before `1.0.0`. Pin a tilde range (`~0.2.0`) until then.
+> **Beta.** Public APIs may change before `1.0.0`. Pin a tilde range (`~0.3.0`) until then.
 
 ## Features
 
@@ -157,7 +157,7 @@ A dev-only debug route can drain the buffer for inspection — see [`docs/integr
 | Version | Status | Highlights |
 |---|---|---|
 | **`0.2.0-beta.0`** | Published (2026-06-29) | Public framework + shared APIs, AG-UI middleware, frontend-tool labelling, DID-signed requests, OTel install removed. |
-| **`0.3.0-beta.0`** | Unreleased (in `main`) | Verdict discriminated union, `SpanBuffer`, tool-span synthesis, sibling-event hook transport. |
+| **`0.3.0-beta.0`** | Current (2026-06-29) | Verdict discriminated union, `SpanBuffer`, tool-span synthesis, sibling-event hook transport. |
 | **`0.4.0`** (planned) | — | `constrain` and `halt` enforcement wired. |
 | **`0.5.0`** (planned) | — | `require_approval` polling wired; targeting `1.0.0` stability. |
 

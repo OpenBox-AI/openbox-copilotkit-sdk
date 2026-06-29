@@ -1,7 +1,7 @@
 # Project Roadmap
 
 **Last Updated**: 2026-06-29  
-**Current Version**: 0.2.0-beta.0  
+**Current Version**: 0.3.0-beta.0
 **Stable Release Target**: 0.5.0 (Q3 2026 estimate)
 
 ## Version History
@@ -12,7 +12,7 @@
 - Manual middleware attachment
 - OpenTelemetry tracing (removed in 0.2.0)
 
-### 0.2.0-beta.0 (Current, June 2026)
+### 0.2.0-beta.0 (Published, June 2026)
 - **Highlight**: OpenTelemetry removed; governance events live independently
 - `withOpenBoxRuntime()` canonical entry point
 - 5-header DID-signed requests
@@ -27,7 +27,7 @@
 
 ---
 
-## Roadmap: 0.3.0-beta.0 (Q2–Q3 2026)
+## 0.3.0-beta.0 (Current, June 2026)
 
 ### Phase 1: Verdict Implementation (Jun–Jul 2026)
 

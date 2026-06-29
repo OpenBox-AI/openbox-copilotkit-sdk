@@ -1,0 +1,74 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.10.x"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve release metadata
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_name="${GITHUB_REF_NAME}"
+          version="${tag_name#v}"
+          package_version="$(node -p "require('./package.json').version")"
+
+          if [[ "$tag_name" != v* ]]; then
+            echo "Expected a v-prefixed release tag, got: $tag_name" >&2
+            exit 1
+          fi
+
+          if [[ "$version" != "$package_version" ]]; then
+            echo "Tag version ($version) does not match package.json version ($package_version)." >&2
+            exit 1
+          fi
+
+          dist_tag="latest"
+          prerelease="${version#*-}"
+          if [[ "$prerelease" != "$version" ]]; then
+            dist_tag="${prerelease%%.*}"
+            if [[ "$dist_tag" == "latest" ]]; then
+              echo "Prerelease versions must not publish with the latest dist-tag." >&2
+              exit 1
+            fi
+          fi
+
+          if [[ ! "$dist_tag" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; then
+            echo "Invalid npm dist-tag derived from version: $dist_tag" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$dist_tag" >> "$GITHUB_OUTPUT"
+          echo "Publishing $version with npm dist-tag '$dist_tag'."
+
+      - name: Check
+        run: npm run ci:check
+
+      - name: Verify package contents
+        run: npm run pack:check
+
+      - name: Publish to npm
+        run: npm publish --tag "${{ steps.release.outputs.dist_tag }}" --access public

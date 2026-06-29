@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- No changes yet.
+
+## 0.3.0-beta.0 — 2026-06-29
+
 ### Added — verdict surface (Phase 1)
 
 - `OpenBoxVerdict` 5-case discriminated union (`allow` / `constrain` / `require_approval` / `block` / `halt`) under `src/verdict/`. Companion zod schema `OpenBoxVerdictSchema`.
@@ -26,6 +30,14 @@
 - New emitter method `emitActivityCompletedHook(input: ActivityCompletedHookInput)` carries the sibling event. The wire shape mirrors `openbox-core/internal/content/governance.go:SpanData` (validated empirically + cross-checked against `openbox-mastra-sdk`'s `createHookSpan`): top-level `semantic_type`, `hook_type`, `kind`, `events: []`, `start_time` / `end_time` as JSON numbers (NOT strings — Go unmarshals into `int64`), `status: { code: "OK"|"ERROR" }` struct, `stage: "completed"`. The internal `SpanData` export (used by `SpanBuffer` consumers) keeps the OTel-style `start_time_unix_nano` (bigint) shape — wire transformation is scoped to the emit boundary via the private `toWireSpan` helper.
 - Span nano-time fields (`start_time_unix_nano` / `end_time_unix_nano` / `events[].time_unix_nano`) are coerced to OTel-JSON decimal strings at the wire boundary so the payload is JSON-serializable. The buffer keeps the raw `bigint` shape.
 - When `spanBuffer` is absent or `OPENBOX_DISABLE_SPAN_BUFFER=1`, the sibling hook event is suppressed — wire output is byte-identical to the pre-transport buffer-only path. Synthesis errors are swallowed and logged; the original `ActivityCompleted` still ships and no sibling event is emitted.
+
+### Documentation
+
+- Reworked the public README and added project docs.
+
+### Tooling
+
+- Added tag-based npm publish workflow.
 
 ### Notes
 

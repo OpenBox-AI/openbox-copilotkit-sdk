@@ -1,6 +1,6 @@
 # OpenBox CopilotKit SDK — Project Overview & PDR
 
-**Version**: 0.2.0-beta.0  
+**Version**: 0.3.0-beta.0
 **Updated**: 2026-06-29  
 **License**: MIT
 
