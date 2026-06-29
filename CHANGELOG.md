@@ -20,6 +20,11 @@
 - New env knob `OPENBOX_DISABLE_SPAN_BUFFER=1` skips synthesis entirely (emergency bypass).
 - Test fixtures: 4 recorded AG-UI streams under `test/fixtures/agui-streams/` (single tool call, parallel tool calls, streamed args, end-without-result).
 
+### Added — span envelope transport
+
+- `function_call` spans now ship inline on the `ActivityCompleted` envelope when a `spanBuffer` is wired (previously buffered locally only). The middleware synthesizes the span before the emit, sets `payload.spans = [span]` + `payload.hook_trigger = true`, then still appends to the buffer for local-debug consumers. When `spanBuffer` is absent or `OPENBOX_DISABLE_SPAN_BUFFER=1`, the envelope is byte-identical to the prior buffer-only path. Synthesis errors are swallowed and logged — the activity event still ships without a `spans` key.
+- `ActivityCompletedInput` now accepts an optional `spans?: SpanData[]` field (additive, opt-in via spread idiom).
+
 ### Notes
 
 - Additive only — the existing `Verdict` string-enum, `GovernanceVerdictResponse` class, and AG-UI emitter fanout stay unchanged. No call sites in middleware or emitter are altered by this slice; the applier is exercised by tests + the example demo wiring (Phase 3).

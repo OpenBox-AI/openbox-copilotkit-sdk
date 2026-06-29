@@ -9,6 +9,7 @@ import { Observable } from "rxjs";
 
 import { attachAuditEnvelope } from "../audit/audit-envelope.js";
 import { getOpenBoxExecutionContext } from "../governance/context.js";
+import type { SpanData } from "../spans/index.js";
 import { readSpanBufferEnv, type SpanBuffer } from "../spans/span-buffer.js";
 import {
   synthesizeToolSpan,
@@ -507,6 +508,14 @@ export class OpenBoxMiddleware extends Middleware {
       return;
     }
     const endTime = entry.endTime ?? Date.now();
+    const span = this.#synthesizeToolSpanOrNull({
+      activityId,
+      activityOutput,
+      endTime,
+      entry,
+      state,
+      status
+    });
     await this.#emitter.emitActivityCompleted({
       activityArgs: entry.activityArgs,
       activityId,
@@ -516,23 +525,19 @@ export class OpenBoxMiddleware extends Middleware {
       goal,
       metadata,
       runId: state.runId,
+      ...(span ? { spans: [span] } : {}),
       startTime: entry.startTime,
       status,
       toolName: entry.toolName,
       workflowId: state.workflowId
     });
-    this.#synthesizeToolSpanIfWired({
-      activityId,
-      activityOutput,
-      endTime,
-      entry,
-      state,
-      status
-    });
+    if (span && this.#spanBuffer) {
+      this.#spanBuffer.append(state.workflowId, span);
+    }
     entry.completed = true;
   }
 
-  #synthesizeToolSpanIfWired({
+  #synthesizeToolSpanOrNull({
     activityId,
     activityOutput,
     endTime,
@@ -546,9 +551,9 @@ export class OpenBoxMiddleware extends Middleware {
     entry: ToolCallBufferEntry;
     state: PerRunState;
     status: "completed" | "failed" | "aborted";
-  }): void {
+  }): SpanData | null {
     if (this.#spanSynthesisDisabled || !this.#spanBuffer) {
-      return;
+      return null;
     }
     try {
       const span = synthesizeToolSpan(
@@ -587,13 +592,14 @@ export class OpenBoxMiddleware extends Middleware {
         workflowId: state.workflowId
       });
 
-      this.#spanBuffer.append(state.workflowId, span);
+      return span;
     } catch (err) {
       this.#logger.warn?.({
         err,
         note: "openbox tool-span synthesis failed",
         workflow_id: state.workflowId
       });
+      return null;
     }
   }
 

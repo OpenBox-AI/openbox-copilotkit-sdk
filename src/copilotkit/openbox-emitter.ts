@@ -1,4 +1,5 @@
 import type { OpenBoxClient } from "../client/openbox-client.js";
+import type { SpanData } from "../spans/index.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { WorkflowEventType } from "../types/workflow-event-type.js";
 
@@ -57,6 +58,14 @@ export interface ActivityCompletedInput {
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
   runId: string;
+  /**
+   * Optional synthesized spans (e.g. `function_call`) to ship inline on the
+   * `ActivityCompleted` envelope. When present and non-empty the emitter also
+   * sets `hook_trigger: true`, which is the gate `OpenBoxClient` uses to
+   * forward `spans`/`span_count` to openbox-core. When absent the envelope is
+   * byte-identical to the pre-transport (0.3.0-beta.0) shape.
+   */
+  spans?: SpanData[];
   startTime?: number | undefined;
   status: "completed" | "failed" | "aborted";
   toolName: string;
@@ -180,6 +189,8 @@ export class OpenBoxCopilotKitEmitter {
   public async emitActivityCompleted(
     input: ActivityCompletedInput
   ): Promise<GovernanceVerdictResponse | null> {
+    const hasSpans = Array.isArray(input.spans) && input.spans.length > 0;
+    const wireSpans = hasSpans ? input.spans!.map(serializeSpan) : undefined;
     const payload = withBaseEnvelope({
       activity_id: input.activityId,
       activity_input: serializeActivityInput(input.activityArgs),
@@ -192,8 +203,10 @@ export class OpenBoxCopilotKitEmitter {
       ...(input.error ? { error: input.error } : {}),
       event_type: WorkflowEventType.ACTIVITY_COMPLETED,
       ...(input.goal ? { goal: input.goal } : {}),
+      ...(hasSpans ? { hook_trigger: true } : {}),
       ...(input.metadata ? { metadata: input.metadata } : {}),
       run_id: input.runId,
+      ...(wireSpans ? { spans: wireSpans } : {}),
       ...(typeof input.startTime === "number"
         ? { start_time: input.startTime }
         : {}),
@@ -344,6 +357,39 @@ function serializeActivityOutput(value: unknown): unknown {
     return null;
   }
   return safeSerialize(value);
+}
+
+/**
+ * Coerce a `SpanData`'s `bigint` nano-time fields to decimal strings.
+ *
+ * `JSON.stringify` throws on any `bigint`, and `OpenBoxClient.evaluate`
+ * serializes the entire payload before POSTing it. The wire format follows
+ * the OTel JSON convention of representing 64-bit nano-second timestamps as
+ * decimal-encoded strings — this keeps full precision (Number can't hold
+ * `2^63 - 1`) and matches what openbox-core's indexers expect.
+ *
+ * The `SpanBuffer` itself still holds the raw `bigint` shape — this coercion
+ * is scoped to the wire boundary only.
+ */
+function serializeSpan(span: unknown): Record<string, unknown> {
+  if (span === null || typeof span !== "object") {
+    return span as Record<string, unknown>;
+  }
+  const source = span as Record<string, unknown>;
+  const result: Record<string, unknown> = {};
+  for (const key of Object.keys(source)) {
+    const value = source[key];
+    if (typeof value === "bigint") {
+      result[key] = value.toString(10);
+    } else if (Array.isArray(value)) {
+      result[key] = (value as unknown[]).map((item: unknown): unknown =>
+        item !== null && typeof item === "object" ? serializeSpan(item) : item
+      );
+    } else {
+      result[key] = value;
+    }
+  }
+  return result;
 }
 
 function safeSerialize(value: unknown): unknown {

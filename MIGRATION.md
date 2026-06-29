@@ -8,6 +8,22 @@
 
 1. **New public types** under the package root: `OpenBoxVerdict`, `OpenBoxConstraint`, `OpenBoxReplacement`, `ApplierContext`, `ApplierResult`, `SpanData`, `SpanBuffer`, `EnforcementStatus`, plus the helper functions `mapVerdict`, `applyVerdict`, `synthesizeToolSpan`, `attachAuditEnvelope`, `idempotencyKey`. The existing `Verdict` enum and `GovernanceVerdictResponse` class are **unchanged**.
 2. **AG-UI middleware accepts two new options:** `spanBuffer` and `redactPaths`. When `spanBuffer` is provided, the middleware synthesizes one `function_call` span per tool call. When omitted, behavior is identical to `0.2.x`.
+3. **Span transport.** When `spanBuffer` is wired, the synthesized `function_call` span now ships **inline on the `ActivityCompleted` envelope** (as `payload.spans` + `hook_trigger: true`) so it lands on the corresponding openbox-core session alongside whatever `llm_completion` spans your other SDK emits. The buffer write is preserved — local-debug consumers (e.g. the `/api/debug/openbox-spans` route below) still drain via the buffer. Consumers that do **not** wire a `spanBuffer` see no envelope change (the `spans` / `hook_trigger` keys are omitted; payload shape is byte-identical to `0.3.0-beta.0`'s buffer-only path).
+
+   Before (buffer-only):
+
+   ```jsonc
+   // ActivityCompleted on the wire
+   { "event_type": "ActivityCompleted", "activity_id": "...", /* no spans field */ }
+   ```
+
+   After (envelope-attached when buffer wired):
+
+   ```jsonc
+   { "event_type": "ActivityCompleted", "activity_id": "...",
+     "hook_trigger": true,
+     "spans": [ { "name": "tool:weatherTool", "attributes": { "openbox.semantic_type": "function_call", "...": "..." } } ] }
+   ```
 
 ### Recommended setup
 
@@ -68,7 +84,7 @@ If your code ingests `OpenBoxVerdict` and you want to defer these without an err
 ### Rollback
 
 - Code-level: revert the diff that added `spanBuffer` to your middleware options. The buffer holds no persistent state — no migration to undo.
-- Runtime: set `OPENBOX_DISABLE_SPAN_BUFFER=1` to skip synthesis without redeploying.
+- Runtime: set `OPENBOX_DISABLE_SPAN_BUFFER=1` to skip synthesis without redeploying. Effect: no spans are appended to the buffer **and** no `spans` / `hook_trigger` keys are attached to the `ActivityCompleted` envelope — wire-format reverts to the pre-`0.3.0-beta.0` shape.
 
 ## 0.2.0-beta.0 — 2026-06-29
 
