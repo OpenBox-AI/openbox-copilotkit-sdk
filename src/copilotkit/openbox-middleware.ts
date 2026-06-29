@@ -538,7 +538,6 @@ export class OpenBoxMiddleware extends Middleware {
       await this.#emitter.emitActivityCompletedHook({
         activityArgs: entry.activityArgs,
         activityId,
-        ...(activityOutput !== undefined ? { activityOutput } : {}),
         agentId,
         durationMs: Math.max(0, endTime - entry.startTime),
         endTime,
@@ -548,7 +547,6 @@ export class OpenBoxMiddleware extends Middleware {
         runId: state.runId,
         span,
         startTime: entry.startTime,
-        toolName: entry.toolName,
         workflowId: state.workflowId
       });
       this.#spanBuffer?.append(state.workflowId, span);

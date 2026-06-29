@@ -88,15 +88,22 @@ describe("OpenBoxMiddleware — function_call span hook event", () => {
     );
     expect(hook).toBeDefined();
     expect(hook?.hook_trigger).toBe(true);
-    expect(hook?.hook_stage).toBe("completed");
     expect(hook?.activity_id).toBe("call-1");
-    expect(hook?.tool_name).toBe("weatherTool");
+
+    // openbox-core rejects ActivityStarted events that carry activity_output
+    // or unknown top-level fields like tool_name (validated empirically).
+    expect(Object.prototype.hasOwnProperty.call(hook!, "activity_output")).toBe(
+      false
+    );
+    expect(Object.prototype.hasOwnProperty.call(hook!, "tool_name")).toBe(false);
 
     const spans = hook?.spans as unknown[] | undefined;
     expect(Array.isArray(spans)).toBe(true);
     expect(spans?.length).toBe(1);
     const span = spans?.[0] as Record<string, unknown>;
     expect(span.name).toBe("tool:weatherTool");
+    // openbox-core derives `hook_stage` from `span.stage` (matches mastra-sdk).
+    expect(span.stage).toBe("completed");
     const attrs = span.attributes as Record<string, unknown>;
     expect(attrs["tool.name"]).toBe("weatherTool");
     expect(attrs["tool.call_id"]).toBe("call-1");

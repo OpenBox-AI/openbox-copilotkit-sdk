@@ -24,10 +24,12 @@
    { "event_type": "ActivityCompleted", "activity_id": "call_1", "activity_type": "weatherTool" }
    { "event_type": "ActivityStarted", "activity_id": "call_1",
      "activity_type": "function_call",
-     "hook_trigger": true, "hook_stage": "completed",
-     "tool_name": "weatherTool",
-     "spans": [ { "name": "tool:weatherTool", "attributes": { "openbox.semantic_type": "function_call", "...": "..." } } ] }
+     "hook_trigger": true,
+     "spans": [ { "name": "tool:weatherTool", "stage": "completed",
+                  "attributes": { "openbox.semantic_type": "function_call", "...": "..." } } ] }
    ```
+
+   The hook event intentionally omits `activity_output` (`ActivityStarted` never carries outputs in openbox-core's accepted shape) and stores the hook stage on `span.stage` (openbox-core derives `hook_stage` from there).
 
    Span timestamps (`start_time_unix_nano` / `end_time_unix_nano`) are coerced to OTel-JSON decimal strings on the wire so the payload remains JSON-serializable. The `SpanBuffer` keeps the raw `bigint` shape.
 

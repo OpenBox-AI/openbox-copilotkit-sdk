@@ -79,7 +79,6 @@ export interface ActivityCompletedInput {
 export interface ActivityCompletedHookInput {
   activityArgs?: unknown;
   activityId: string;
-  activityOutput?: unknown;
   agentId?: string | undefined;
   durationMs?: number | undefined;
   endTime?: number | undefined;
@@ -89,7 +88,6 @@ export interface ActivityCompletedHookInput {
   runId: string;
   span: SpanData;
   startTime?: number | undefined;
-  toolName: string;
   workflowId: string;
 }
 
@@ -241,21 +239,24 @@ export class OpenBoxCopilotKitEmitter {
 
   /**
    * Sibling event to `emitActivityCompleted` that carries the synthesized
-   * `function_call` span. Shaped as `ActivityStarted` with
-   * `hook_trigger: true` + `hook_stage: "completed"` so openbox-core's
-   * existing hook-span ingestion path (the one that accepts mastra-sdk's
-   * HTTP/DB hook spans) accepts it. Same `activity_id` as the completion
-   * event but distinct `activity_type: "function_call"` so the two phases
-   * stay tied at the openbox-core UI without collision.
+   * `function_call` span. Shaped as `ActivityStarted` with `hook_trigger:
+   * true` and a `stage: "completed"` field on the span itself — openbox-core
+   * derives `hook_stage` from `span.stage`, matching the shape that
+   * `openbox-mastra-sdk` ships for its HTTP/DB hook spans. Same `activity_id`
+   * as the original completion event ties the two phases at the session UI.
+   *
+   * Intentionally omits `activity_output` (ActivityStarted events never carry
+   * outputs in the accepted shape — openbox-core rejects with 400 otherwise)
+   * and `tool_name` (not part of the validated schema).
    */
   public async emitActivityCompletedHook(
     input: ActivityCompletedHookInput
   ): Promise<GovernanceVerdictResponse | null> {
     const wireSpan = serializeSpan(input.span);
+    wireSpan.stage = "completed";
     const payload = withBaseEnvelope({
       activity_id: input.activityId,
       activity_input: serializeActivityInput(input.activityArgs),
-      activity_output: serializeActivityOutput(input.activityOutput),
       activity_type: "function_call",
       ...(input.agentId ? { agent_id: input.agentId } : {}),
       ...(typeof input.durationMs === "number"
@@ -265,7 +266,6 @@ export class OpenBoxCopilotKitEmitter {
       event_type: WorkflowEventType.ACTIVITY_STARTED,
       frontend: input.frontend,
       ...(input.goal ? { goal: input.goal } : {}),
-      hook_stage: "completed",
       hook_trigger: true,
       ...(input.metadata ? { metadata: input.metadata } : {}),
       run_id: input.runId,
@@ -273,7 +273,6 @@ export class OpenBoxCopilotKitEmitter {
       ...(typeof input.startTime === "number"
         ? { start_time: input.startTime }
         : {}),
-      tool_name: input.toolName,
       workflow_id: input.workflowId,
       workflow_type: COPILOTKIT_WORKFLOW_TYPE
     });
