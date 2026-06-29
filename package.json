@@ -27,7 +27,6 @@
   "files": [
     "dist",
     "docs",
-    "COPIED_FROM.md",
     "README.md",
     "LICENSE"
   ],
@@ -77,16 +76,15 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsup",
-    "check:copied": "node scripts/check-copied-drift.mjs",
     "check:no-mastra": "node scripts/check-no-mastra-imports.mjs",
     "check:no-otel": "node scripts/check-no-otel.mjs",
-    "ci:check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run check:copied && npm run check:no-mastra && npm run check:no-otel",
+    "ci:check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run check:no-mastra && npm run check:no-otel",
     "clean": "rm -rf coverage dist",
     "format": "prettier --write .",
     "lint": "eslint .",
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "npm run lint && npm run typecheck && npm run test && npm run check:copied && npm run check:no-mastra && npm run check:no-otel",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run test && npm run check:no-mastra && npm run check:no-otel",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"

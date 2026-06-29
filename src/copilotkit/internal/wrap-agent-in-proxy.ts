@@ -29,25 +29,18 @@ export interface WrapAgentInProxyOptions {
 /**
  * Wrap an `AbstractAgent` in a `Proxy` that:
  *
- *   1. Leaves the ORIGINAL agent fully untouched — no `.use()`, no `.clone`
- *      replacement, no other in-place mutation. The plan's clone-safety
- *      regression turns on this invariant (two wraps with different configs
- *      over the same agent must not cross-talk via shared identity).
+ *   1. Leaves the original agent fully untouched: no `.use()`, no `.clone`
+ *      replacement, and no other in-place mutation.
  *   2. Intercepts `.clone()` so that each per-request clone:
  *        a. Comes from the original `clone()` (real per-request copy).
  *        b. Has `createOpenBoxMiddleware(controller)` attached via `.use()`
  *           SYNCHRONOUSLY — making OpenBox the first/innermost middleware on
- *           the clone, so it observes raw agent events BEFORE any A2UI / MCP /
- *           OpenGenUI middleware that v2's `configureAgentForRequest` adds
- *           afterwards.
+ *           the clone.
  *        c. Is itself wrapped in a fresh proxy so that clone-of-clone keeps
  *           the same observation contract.
  *
- * Why attach at clone-time instead of via `queueMicrotask` on `.use()`: the
- * per-request flow in `handle-run.ts` is `cloneAgentForRequest →
- * configureAgentForRequest → handleSseRun`. Attaching at clone-time makes
- * OpenBox the innermost middleware deterministically — no timing window, no
- * fallback needed when the runtime has no A2UI/MCP/OpenGenUI configured.
+ * Attaching at clone-time makes OpenBox observation deterministic for every
+ * per-request clone.
  *
  * Edge cases:
  *   - Agents without `.use()` (custom AG-UI implementations): we log a warn
@@ -61,11 +54,8 @@ export interface WrapAgentInProxyOptions {
  *     `this.clone()` or `this.use()` rather than going through an external
  *     caller): the proxy's `get` trap binds non-intercepted methods to
  *     `target`, so any `this.clone()` inside an agent method bypasses the
- *     interceptor. v2 CopilotKit invokes `.clone()` / `.use()` externally
- *     only (per `handle-run.ts` + `configureAgentForRequest`), so this is
- *     a non-issue for the CopilotKit boundary; custom adopters with
- *     self-cloning agents should externalise the call to keep observation
- *     intact.
+ *     interceptor. Custom adopters with self-cloning agents should externalize
+ *     the call to keep observation intact.
  */
 export function wrapAgentInProxy<T extends AbstractAgent>(
   agent: T,

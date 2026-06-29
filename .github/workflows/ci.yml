@@ -32,7 +32,7 @@ jobs:
         run: npm test
       - name: Build
         run: npm run build
-      - name: Check copied-module drift (LOCAL only)
-        run: npm run check:copied
-      - name: Check no @mastra imports in copied modules
+      - name: Check no @mastra imports in SDK source
         run: npm run check:no-mastra
+      - name: Check no @opentelemetry imports in SDK source
+        run: npm run check:no-otel

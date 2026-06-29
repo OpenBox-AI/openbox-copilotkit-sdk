@@ -60,7 +60,7 @@ describe("OpenBoxMiddleware — function_call span hook event", () => {
     }
   });
 
-  it("emits a sibling ActivityStarted hook event carrying the synthesized span (buffer wired)", async () => {
+  it("emits a paired ActivityStarted hook event carrying the synthesized span (buffer wired)", async () => {
     const { controller, evaluateMock } = buildController();
     const spanBuffer = new SpanBuffer();
     const middleware = createOpenBoxMiddleware(controller, { spanBuffer });

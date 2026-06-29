@@ -172,8 +172,8 @@ function structuredCloneSafe(value: object): object {
  *  - `$..<key>`     → redact every leaf key with that name, at any depth.
  *  - `$.a.b.<key>`  → redact a fixed dotted path.
  *
- * Everything else is ignored (best-effort; no JSONPath engine pulled in for
- * this slice — YAGNI per plan non-goals).
+ * Everything else is ignored; this intentionally avoids pulling in a full
+ * JSONPath engine.
  */
 function applyRedaction(target: unknown, path: string): void {
   if (typeof target !== "object" || target === null) {

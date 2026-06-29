@@ -1,11 +1,6 @@
 import type { OpenBoxLogger } from "../copilotkit/types.js";
 
-/**
- * Gateway tag identifying the SDK boundary that observed/enforced the
- * verdict. Locked across SDKs: copilotkit-sdk uses `agui_event` (AG-UI
- * middleware seam) and `server_tool` (server-tool gateway, later gate);
- * mastra-sdk uses `llm` for its LLM-completion-span emission seam.
- */
+/** Gateway tag identifying the boundary that observed or enforced a verdict. */
 export type ApplierGateway =
   | "agui_event"
   | "frontend"
@@ -38,11 +33,7 @@ export interface ApplierEvent {
   workflowId: string;
 }
 
-/**
- * Per-call context passed to `applyVerdict`. The `auditEnvelope` callback is
- * the only side-effect channel — Phase 2 wires it to the in-flight span in
- * `SpanBuffer`; Phase 1 tests use an in-memory recorder.
- */
+/** Per-call context passed to `applyVerdict`. */
 export interface ApplierContext {
   auditEnvelope: (attrs: Record<string, unknown>) => void;
   event?: ApplierEvent;

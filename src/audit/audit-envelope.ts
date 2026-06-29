@@ -5,9 +5,9 @@ import { idempotencyKey } from "./idempotency-key.js";
 import type { SpanData } from "../spans/span-data.js";
 
 /**
- * Enforcement-status vocabulary locked at brainstorm validation (2026-06-29).
- * Each value carries a distinct semantic meaning when read off a span by the
- * OpenBox UI or by post-hoc analysis.
+ * Enforcement-status vocabulary attached to OpenBox audit spans.
+ * Each value carries a distinct semantic meaning for UI rendering and
+ * post-hoc analysis.
  */
 export type EnforcementStatus =
   | "approval_pending"
@@ -19,10 +19,7 @@ export type EnforcementStatus =
   | "pre_execution_blocked"
   | "pre_execution_constrained";
 
-/**
- * Audit-envelope owner tag — locked for this SDK. Cross-checked by the
- * adapter coverage matrix in mastra-sdk's CHANGELOG ("openbox-mastra").
- */
+/** Audit-envelope owner tag for spans emitted by this SDK. */
 export const ENFORCEMENT_OWNER = "openbox-copilotkit" as const;
 
 export interface AuditEnvelopeInput {
@@ -38,17 +35,8 @@ export interface AuditEnvelopeInput {
 }
 
 /**
- * Mutate `span.attributes` in place to attach the locked audit-envelope
+ * Mutate `span.attributes` in place to attach the OpenBox audit-envelope
  * attribute set. Returns the same span for ergonomic chaining.
- *
- * Locked attribute keys (do not rename — these cross repo boundaries by
- * convention with `@openbox-ai/openbox-mastra-sdk` and Core's indexers):
- *  - `openbox.enforcement_owner` (constant for this SDK)
- *  - `openbox.gateway`
- *  - `openbox.enforcement_status`
- *  - `openbox.idempotency_key`
- *  - `openbox.policy_version` (optional — only when verdict was consulted)
- *  - `openbox.trace_id` (optional — only when call site has it)
  */
 export function attachAuditEnvelope(
   span: SpanData,

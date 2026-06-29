@@ -14,30 +14,9 @@ import {
   collectEvents
 } from "../unit/copilotkit/test-utils.js";
 
-/**
- * Lossless-drop proof, codified.
- *
- * Feeds a canonical AG-UI event sequence (text reply + frontend tool call)
- * through createOpenBoxMiddleware against a recording OpenBoxClient. Captures
- * the exact sequence of client.evaluate() payloads (timestamps + the
- * activity_id stripped for determinism) and asserts byte-identity against
- * the JSONL snapshot committed under
- * plans/260629-0501-drop-otel-from-openbox-copilotkit-sdk/snapshots/.
- *
- * On first run (snapshot missing) the file is generated and the test is
- * marked TODO so the developer must explicitly review + commit the snapshot.
- * On subsequent runs (Phases 2-4 OTel deletion) the test must continue to
- * pass — that IS the empirical proof that dropping OTel costs zero data the
- * OpenBox UI consumes via client.evaluate().
- *
- * The snapshot lives OUTSIDE the SDK repo (under the plan directory in the
- * CopilotKit monorepo) because the plan owns the artifact across both repos.
- * Path is resolved relative to this test file's location.
- */
-
 const SNAPSHOT_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
-  "../../../CopilotKit/examples/integrations/mastra/plans/260629-0501-drop-otel-from-openbox-copilotkit-sdk/snapshots/evaluate-payloads-baseline.jsonl"
+  "../fixtures/evaluate-payloads-baseline.jsonl"
 );
 
 const STRIPPED_KEYS = new Set([
@@ -113,7 +92,7 @@ async function recordPayloads(events: BaseEvent[]): Promise<Record<string, unkno
   return evaluateMock.mock.calls.map(args => args[0] as Record<string, unknown>);
 }
 
-describe("evaluate() payload baseline (lossless-drop proof)", () => {
+describe("evaluate() payload baseline", () => {
   it("text-only + frontend-tool-call canonical sequence matches snapshot", async () => {
     const textPayloads = await recordPayloads(canonicalTextRun);
     const toolPayloads = await recordPayloads(canonicalToolCallRun);

@@ -17,10 +17,9 @@ export const USER_INPUT_SIGNAL_NAME = "user_input";
 export const AGENT_OUTPUT_SIGNAL_NAME = "agent_output";
 
 /**
- * Optional OpenBox multi-agent fields, mixed into the emitter inputs. Both are
- * omitted from the wire payload when undefined, so single-agent runs are byte
- * -for-byte unchanged. `parentWorkflowId` is only meaningful on a CHILD
- * agent's workflow-lifecycle events; the CopilotKit parent never sets it.
+ * Optional OpenBox multi-agent fields, mixed into emitter inputs. Both are
+ * omitted from the wire payload when unset, so single-agent runs keep their
+ * normal payload shape.
  */
 export interface MultiAgentEventFields {
   multiAgentSessionId?: string | undefined;
@@ -79,16 +78,9 @@ export interface ActivityCompletedInput {
 }
 
 /**
- * Carrier for a synthesized `function_call` span. Emitted as a separate
- * `ActivityStarted`-shaped event with `hook_trigger: true` and
- * `hook_stage: "completed"` so it lands on openbox-core via the same
- * code path that accepts mastra-sdk's hook spans (HTTP/DB instrumentation).
- *
- * Background: openbox-core rejects `ActivityCompleted` payloads that carry
- * a `spans` field (returns 400 invalid request body), so we cannot inline
- * the span on the original completion event. Posting a sibling event with
- * the same `activityId` but `activity_type: "function_call"` ties the span
- * back to the originating tool call without changing the completion shape.
+ * Carrier for a synthesized `function_call` span. It is emitted as a separate
+ * hook-style activity event so the original tool completion payload remains
+ * small and schema-stable.
  */
 export interface ActivityCompletedHookInput {
   activityArgs?: unknown;
@@ -124,10 +116,9 @@ export interface WorkflowFailedInput extends MultiAgentEventFields {
 }
 
 /**
- * Input for `emitHandoff`. The Handoff describes the PARENT's workflow
- * identity (`workflow_id`/`workflow_type`/`task_queue` default to CopilotKit)
- * but MUST be sent authenticated as the CHILD agent — pass the child-scoped
- * `OpenBoxClient` as the second arg so Core resolves `to_agent` to the child.
+ * Input for `emitHandoff`. The marker describes the parent workflow and is
+ * sent with the child agent credentials when parent-side handoff emission is
+ * available.
  */
 export interface HandoffEmitInput {
   fromAgentDid: string;
@@ -140,17 +131,9 @@ export interface HandoffEmitInput {
 }
 
 /**
- * Wraps `client.evaluate` for every CopilotKit-observed AG-UI event. Each
- * emit method:
- *
- *   1. Builds a payload shape mirroring `openbox-mastra-sdk/src/mastra/wrap-agent.ts:2031-2074`.
- *   2. Awaits `client.evaluate(payload)` so the optional `enforceApprovals`
- *      caller can inspect the verdict.
- *   3. On error: logs via `runtime.logger.warn` and swallows (fail-open). The
- *      observable stream never errors from emitter failures.
- *
- * Verdict objects are returned to the caller so the middleware can decide
- * whether to inject a redacted `governance_blocked` error frame.
+ * Wraps `client.evaluate` for CopilotKit-observed AG-UI events. Emitter
+ * failures are logged and swallowed so telemetry cannot break the user stream.
+ * Verdict objects are returned to callers that enforce approvals.
  */
 export class OpenBoxCopilotKitEmitter {
   readonly #client: OpenBoxClient;
@@ -275,15 +258,8 @@ export class OpenBoxCopilotKitEmitter {
 
   /**
    * Sibling event to `emitActivityCompleted` that carries the synthesized
-   * `function_call` span. Shaped as `ActivityStarted` with `hook_trigger:
-   * true` and a `stage: "completed"` field on the span itself — openbox-core
-   * derives `hook_stage` from `span.stage`, matching the shape that
-   * `openbox-mastra-sdk` ships for its HTTP/DB hook spans. Same `activity_id`
-   * as the original completion event ties the two phases at the session UI.
-   *
-   * Intentionally omits `activity_output` (ActivityStarted events never carry
-   * outputs in the accepted shape — openbox-core rejects with 400 otherwise)
-   * and `tool_name` (not part of the validated schema).
+   * `function_call` span. The same `activity_id` as the original completion
+   * event ties both payloads together in OpenBox.
    */
   public async emitActivityCompletedHook(
     input: ActivityCompletedHookInput
@@ -369,20 +345,14 @@ export class OpenBoxCopilotKitEmitter {
   }
 
   /**
-   * Emit a multi-agent `Handoff` marker. MUST be called with a `client` scoped
-   * to the CHILD agent's identity — Core derives the handoff's `to_agent` from
-   * the authenticated emitter, and `from_agent_did` carries the parent. When
-   * `client` is omitted the payload is surfaced to `onEvent` (so a remote
-   * child runtime can pick up the embedded context) but NOT sent to Core:
-   * emitting under the parent identity would record a self-to-self handoff.
+   * Emit a multi-agent `Handoff` marker. When `client` is omitted, the payload
+   * is surfaced to `onEvent` so a remote child runtime can emit it itself.
    */
   public async emitHandoff(
     input: HandoffEmitInput,
     client?: OpenBoxClient
   ): Promise<GovernanceVerdictResponse | null> {
-    // Core's ValidateHandoffPayload rejects a Handoff missing either field, so
-    // never put an invalid marker on the wire — keep the invariant local rather
-    // than relying solely on the caller.
+    // Keep invalid handoff markers off the wire.
     if (!input.fromAgentDid || !input.multiAgentSessionId) {
       this.#logger.warn?.({
         note: "openbox emitHandoff: missing from_agent_did or multi_agent_session_id — skipping handoff",
@@ -511,9 +481,8 @@ function serializeWorkflowOutput(value: unknown): unknown {
 function serializeSignalArgs(value: unknown, asArray: boolean): unknown {
   const serialized =
     value === undefined || value === null ? null : safeSerialize(value);
-  // Multi-agent mode emits the array shape the OpenBox backend timeline reads
-  // (its extractSignalText takes element 0). Standalone mode keeps the legacy
-  // `{ value }` shape so non-multi-agent payloads are byte-identical.
+  // Multi-agent mode emits array-shaped signal args; standalone mode keeps the
+  // legacy `{ value }` wrapper.
   return asArray ? [serialized] : { value: serialized };
 }
 
@@ -532,22 +501,9 @@ function serializeActivityOutput(value: unknown): unknown {
 }
 
 /**
- * Transform an internal `SpanData` into the wire shape openbox-core's
- * `GovernanceEventPayload.Spans` array expects. The internal `SpanData`
- * mirrors the OTel JSON convention (`start_time_unix_nano: bigint`,
- * `status: "ok"|"error"`); openbox-core's Go schema uses different field
- * names and types (`start_time: int64`, `status: { code: "OK"|"ERROR" }`,
- * top-level `semantic_type` / `hook_type` / `kind`). Validated empirically
- * against `openbox-core/internal/content/governance.go:SpanData` and the
- * `function_call` shape that `openbox-mastra-sdk`'s `createHookSpan`
- * produces (the only shape openbox-core has been observed to accept for
- * inline spans).
- *
- * Nano-time fields ship as JS Numbers — openbox-core unmarshals JSON
- * numbers into `int64` (it rejects strings). Numbers larger than 2^53 lose
- * trailing-ns precision, which is acceptable for tracing in the current era.
- * The internal `SpanBuffer` keeps the raw `bigint` shape — this transform
- * applies only at the wire boundary.
+ * Transform an internal `SpanData` into the OpenBox wire span shape.
+ * Nano-time fields are sent as JS numbers for JSON transport; the internal
+ * `SpanBuffer` keeps the raw `bigint` values until this boundary.
  */
 function toWireSpan(span: SpanData): Record<string, unknown> {
   const startTime = Number(span.start_time_unix_nano);

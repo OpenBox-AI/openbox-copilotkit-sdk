@@ -55,8 +55,8 @@ export interface MapVerdictOptions {
  *    rewrites).
  *  - `replacement`: harvested from `response.metadata.replacement_content`
  *    if a `block` carries one; validated via `OpenBoxReplacementSchema`.
- *  - `halt_scope`: defaults to `"copilot_run"` (Core treats halt session-wide
- *    today; single-scope MVP locked by brainstorm).
+ *  - `halt_scope`: defaults to `"copilot_run"` because Core currently treats
+ *    halt verdicts as scoped to the active CopilotKit run.
  */
 export function mapVerdict(
   response: GovernanceVerdictResponse,

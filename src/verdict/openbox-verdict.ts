@@ -1,15 +1,9 @@
 import { z } from "zod";
 
 /**
- * Discriminated-union projection of an OpenBox governance verdict.
- *
- * Additive to the existing `Verdict` string-enum (see `src/types/verdict.ts`).
- * The enum stays the canonical wire shape; this union is the SDK-side typed
- * surface that downstream enforcement code can `switch` on without a default
- * branch. Phase 1 ships the union + mapper + applier; only `allow` and
- * `block` are wired through the applier in this gate — `constrain`,
- * `require_approval`, and `halt` audit then throw `VerdictNotImplementedError`
- * until later ship gates land (0.4.0 / 0.5.0).
+ * Discriminated-union projection of an OpenBox governance verdict. Some
+ * verdicts are exposed before every enforcement mode has a runtime
+ * implementation, so appliers may surface `VerdictNotImplementedError`.
  */
 export type OpenBoxVerdict =
   | { type: "allow"; reason?: string }

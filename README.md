@@ -6,7 +6,7 @@ Server-only governance and observability for [CopilotKit](https://www.copilotkit
 
 ## Why no OpenTelemetry?
 
-The SDK observes governance-relevant events at the AG-UI middleware boundary (`TOOL_CALL_START`, `RUN_FINISHED`, etc.) and ships them to the OpenBox API via `client.evaluate(payload)`. OpenTelemetry was inherited from a sibling SDK during initial scaffolding but never load-bearing — the buffered spans were never flushed, and no UI consumer depended on them. Dropping OTel in 0.2.0-beta.0 removed ~700 LOC, 19 dependencies, and the entire process-coexistence problem with other OTel-installing SDKs. If your application needs OTel for unrelated reasons, install it yourself — this SDK no longer competes for the global TracerProvider.
+The SDK observes governance-relevant events at the AG-UI middleware boundary (`TOOL_CALL_START`, `RUN_FINISHED`, etc.) and ships them to the OpenBox API via `client.evaluate(payload)`. OpenTelemetry is intentionally not installed by this SDK, so applications can manage their own tracing setup without a competing global TracerProvider.
 
 ## The adopter diff
 
@@ -53,7 +53,7 @@ One import, one wrap, one `next.config.ts` entry, one optional SIGINT handler.
 | AG-UI `TOOL_CALL_*` triple | `function_call` | ✅ **`@openbox-ai/openbox-copilotkit` (this SDK)** |
 | Vercel AI SDK `LanguageModelV1` call | `llm_completion` | → [`@openbox-ai/openbox-mastra-sdk`](https://www.npmjs.com/package/@openbox-ai/openbox-mastra-sdk) |
 
-The two SDKs are designed to co-run without duplicating spans — each observes a seam the other does not. If you use CopilotKit **without** Mastra and want LLM completion spans, that's a later ship gate (the Vercel-AI-SDK wrap helper can be promoted to a standalone helper at that time).
+The two SDKs are designed to co-run without duplicating spans: each observes a boundary the other does not. If you use CopilotKit without Mastra and need LLM completion spans, use an OpenBox SDK at the model-runtime boundary.
 
 ### Tool-span quickstart
 
@@ -118,7 +118,7 @@ Hit `GET /api/debug/openbox-spans` after a chat turn that fires a tool to see on
 - **Frontend-tool labelling** via explicit `frontendToolNames` allowlist or `isFrontendTool` callback (no heuristic).
 - **DID-signed governance requests** when `OPENBOX_AGENT_DID` + `OPENBOX_AGENT_PRIVATE_KEY` are set.
 
-Deferred to T1: React HITL companion (`@openbox-ai/openbox-copilotkit-react`), per-verdict enforcement matrices, CopilotKit v1 endpoint factories.
+Future packages may add a React HITL companion, broader per-verdict enforcement, and CopilotKit v1 endpoint helpers.
 
 ## Requirements
 

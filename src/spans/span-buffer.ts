@@ -155,8 +155,8 @@ export class SpanBuffer {
 }
 
 /**
- * Read SpanBuffer-related env knobs. Centralized so the middleware factory
- * + the example demo can read them without duplicating the parsing.
+ * Read SpanBuffer-related env knobs. Centralized so SDK integrations can
+ * share the same parsing defaults.
  *
  *  - `OPENBOX_SPAN_BUFFER_MAX_PER_WORKFLOW` (default 1000)
  *  - `OPENBOX_SPAN_BUFFER_TTL_MS`            (default 300000)

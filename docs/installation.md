@@ -16,7 +16,7 @@ npm install @copilotkit/runtime @ag-ui/client
 
 - **Node.js `>=24.10.0`.** The SDK uses `AsyncLocalStorage.enterWith()` and ESM-only language features.
 - **Server-only.** Edge runtimes (Vercel Edge, Cloudflare Workers) are unsupported — AsyncLocalStorage is Node-only.
-- **CopilotKit `runtime/v2`.** The v1 endpoint factories are not supported in T0.
+- **CopilotKit `runtime/v2`.** The v1 endpoint factories are not supported by this SDK version.
 
 ## `next.config.ts` — `serverExternalPackages`
 
@@ -61,7 +61,7 @@ This is the complete change set for a CopilotKit app that already has a `runtime
   import { createCopilotEndpoint, CopilotRuntime } from "@copilotkit/runtime/v2";
 + import { withOpenBoxRuntime } from "@openbox-ai/openbox-copilotkit";
 
-  const agents = { /* ... your MastraAgent / LangGraphAgent / BuiltInAgent record */ };
+  const agents = { /* ... your CopilotKit agent record */ };
 
 - const runtime = new CopilotRuntime({ agents });
 + const { runtime, shutdown } = await withOpenBoxRuntime(
@@ -103,14 +103,14 @@ After running the demo, you should see in the OpenBox dashboard:
 
 If the dashboard is empty, jump to [troubleshooting → "useFrontendTool calls show up as `frontend: false`"](./troubleshooting.md#usefrontendtool-calls-show-up-as-frontend-false).
 
-## Security and privacy (T0)
+## Security and Privacy
 
 - **API keys** are sent in `Authorization: Bearer …`; the SDK refuses non-HTTPS `apiUrl` values for non-localhost hosts (`parseOpenBoxConfig` throws `OpenBoxInsecureURLError`).
 - **DID signatures** bind every request to method + path + timestamp + nonce + body SHA-256, replay-protected; bodies are size-capped (default 10 MiB).
 - **Governance block** verdicts emit a fixed-shape redacted envelope `{ type: 'error', code: 'governance_blocked', correlationId }` — tool name, tenant id, and verdict reason never reach the client (see [api-reference → governance-blocked envelope](./api-reference.md#enforceapprovals-and-the-governance_blocked-envelope)).
 - **AsyncLocalStorage** scopes per-request tenant/agent context — Node-only.
 
-A standalone `security-and-privacy.md` page is deferred to T1. T0-relevant points are summarized here and in [api-reference.md](./api-reference.md).
+Security-relevant behavior is summarized here and in [api-reference.md](./api-reference.md).
 
 ## Next
 

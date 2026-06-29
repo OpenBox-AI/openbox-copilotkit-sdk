@@ -26,12 +26,7 @@ import {
 } from "./before-request.js";
 import { wrapAgentInProxy } from "./wrap-agent-in-proxy.js";
 
-/**
- * Structural projection of a CopilotKit v2 `CopilotRuntimeOptions` agents
- * factory context. Mirrors `AgentFactoryContext` in
- * `@copilotkit/runtime/v2/runtime/core/runtime.ts` without importing the
- * package barrel (the SDK depends on the call-site shape, not the symbol).
- */
+/** Structural projection of a CopilotKit agents factory context. */
 export interface AgentFactoryContextLike {
   request: Request;
 }
@@ -74,11 +69,7 @@ export type AfterRequestMiddlewareFnLike = (
   params: AfterRequestMiddlewareParametersLike
 ) => Promise<void> | void;
 
-/**
- * Caller-supplied overrides on top of `OpenBoxConfigInput`. These are the
- * knobs Phase 6's `withOpenBoxRuntime` re-exposes to adopters; everything
- * else lives in the OpenBox config / env vars.
- */
+/** Caller-supplied overrides on top of `OpenBoxConfigInput`. */
 export interface WrapCopilotRuntimeOptionsExtras {
   /** Defaults consulted by AG-UI emissions when ALS context is absent. */
   defaults?: OpenBoxRuntimeDefaults | undefined;
@@ -113,8 +104,8 @@ export interface WrapCopilotRuntimeOptionsResult<
   controller: OpenBoxRuntimeController;
   options: WrappedCopilotRuntimeOptions<TOptions>;
   /**
-   * Idempotent no-op resolved promise. Reserved for future client-side
-   * cleanup. Safe to leave SIGINT handlers in place.
+   * Idempotent shutdown hook. Kept as part of the public tuple contract even
+   * when there is no client-side cleanup to perform.
    */
   shutdown: () => Promise<void>;
 }
@@ -143,16 +134,12 @@ const DEFAULT_LOGGER: OpenBoxLogger = {
  *      throws; user errors propagate after OpenBox records.
  *   2. Replace the `agents` config with a proxy-wrapped variant. The original
  *      record / Promise / factory is never mutated; per-request `clone()`
- *      calls produce fresh AG-UI agents with the OpenBox middleware attached
- *      as the INNERMOST observer (sees raw events before A2UI/MCP/OpenGenUI).
+ *      calls produce fresh AG-UI agents with the OpenBox middleware attached.
  *   3. Eagerly resolve Promise-shape agents at wrap time so the first
  *      concurrent requests cannot race the proxy attachment.
  *
- * Returns `{ options, controller, shutdown }`. The caller (Phase 6
- * `withOpenBoxRuntime`) is responsible for attaching the controller to the
- * constructed runtime via `attachOpenBoxRuntime` BEFORE serving any request;
- * the composed middleware looks the controller up at request time via the
- * private runtime symbol.
+ * Returns `{ options, controller, shutdown }`. The caller is responsible for
+ * attaching the controller to the constructed runtime before serving requests.
  *
  * INTERNAL — not exported from the public `index.ts`. The public surface is
  * `createOpenBoxMiddleware` + `withOpenBoxRuntime`.
@@ -177,10 +164,7 @@ export async function wrapCopilotRuntimeOptions<
   const markerSymbol = Symbol("openbox.copilotkit.wrap");
   const middlewareOptions = extras.middlewareOptions;
 
-  // Fail LOUD at setup for a multi-agent misconfig. The per-request middleware
-  // constructor also guards this, but that throw happens at lazy clone-time
-  // inside a swallow-and-warn boundary — which would silently disable ALL
-  // governance for the agent. Validating here surfaces it once, at wrap time.
+  // Fail loudly at setup for multi-agent identity misconfiguration.
   const multiAgent = middlewareOptions?.multiAgent;
   if (multiAgent?.enabled && !(multiAgent.parentAgentDid ?? client.agentDid)) {
     throw new OpenBoxConfigError(
