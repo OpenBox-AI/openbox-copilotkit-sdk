@@ -17,6 +17,8 @@ coverage/
 
 # Local reference material
 .reference/
+_notes/
+plans/
 
 # Claude Code agent tooling / worktrees / memory
 .claude/
