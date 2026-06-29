@@ -14,13 +14,13 @@ npm install @copilotkit/runtime @ag-ui/client
 
 ## Runtime requirements
 
-- **Node.js `>=24.10.0`.** The SDK uses `AsyncLocalStorage.enterWith()` and ESM-only OTEL packages.
+- **Node.js `>=24.10.0`.** The SDK uses `AsyncLocalStorage.enterWith()` and ESM-only language features.
 - **Server-only.** Edge runtimes (Vercel Edge, Cloudflare Workers) are unsupported — AsyncLocalStorage is Node-only.
 - **CopilotKit `runtime/v2`.** The v1 endpoint factories are not supported in T0.
 
 ## `next.config.ts` — `serverExternalPackages`
 
-The SDK ships native OTEL instrumentations (`@opentelemetry/instrumentation-http`, `-fs`, etc.) that Next's bundler cannot inline. Add it to `serverExternalPackages` to keep it on the Node runtime:
+The SDK is an ESM Node-only package. Add it to `serverExternalPackages` to keep it on the Node runtime rather than inlining into the bundle:
 
 ```ts
 // next.config.ts
@@ -35,8 +35,6 @@ const nextConfig: NextConfig = {
 
 export default nextConfig;
 ```
-
-Skipping this entry typically surfaces as bundle errors, or — under HMR that loads a fresh module instance per cycle — a re-patched `globalThis.fetch` (idempotency is module-scoped, not process-scoped). See [troubleshooting](./troubleshooting.md#1-bundle-errors-or-fetch-patch-installed-twice-on-hot-reload).
 
 ## Environment variables
 
@@ -78,7 +76,8 @@ This is the complete change set for a CopilotKit app that already has a `runtime
 +   }
 + );
 
-+ // Optional — guarantees the OTEL span processor flushes on shutdown.
++ // Optional — `shutdown()` is an idempotent no-op resolved promise today
++ // (reserved for future client-side cleanup). Safe to leave in place.
 + process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
 + process.on("SIGTERM", async () => { await shutdown(); process.exit(0); });
 
@@ -102,7 +101,7 @@ After running the demo, you should see in the OpenBox dashboard:
 2. One `WorkflowStarted` + `SignalReceived(user_input)` + `SignalReceived(agent_output)` + `WorkflowCompleted` per CopilotKit request.
 3. One `ActivityStarted` + `ActivityCompleted` per tool call, with `frontend: true` on every name in your `frontendToolNames` list and `frontend: false` on everything else.
 
-If the dashboard is empty, jump to [troubleshooting → "useFrontendTool calls show up as `frontend: false`"](./troubleshooting.md#3-usefrontendtool-calls-show-up-as-frontend-false) and [troubleshooting → "peer tracer provider detected"](./troubleshooting.md#6-otel-peer-detect-skip-log-line).
+If the dashboard is empty, jump to [troubleshooting → "useFrontendTool calls show up as `frontend: false`"](./troubleshooting.md#usefrontendtool-calls-show-up-as-frontend-false).
 
 ## Security and privacy (T0)
 

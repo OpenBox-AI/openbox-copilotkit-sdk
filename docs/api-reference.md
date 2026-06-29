@@ -37,7 +37,7 @@ interface WithOpenBoxRuntimeConfig extends OpenBoxConfigInput {
 { runtime: CopilotRuntime, shutdown: () => Promise<void> }
 ```
 
-`shutdown` is **idempotent** — concurrent and repeat calls reuse the first invocation's promise. It tears down OTEL (clears the `globalThis.fetch` patch + the Phase 2 module-private OTEL slots) and clears the runtime-attached controller via the private `OPENBOX_COPILOTKIT_RUNTIME_SYMBOL`.
+`shutdown` is **idempotent** — concurrent and repeat calls reuse the first invocation's promise. It resolves to an inner `Promise.resolve()` (reserved for future client-side cleanup; `OpenBoxClient` has no shutdown method today) and clears the runtime-attached controller via the private `OPENBOX_COPILOTKIT_RUNTIME_SYMBOL`.
 
 **Example**
 
@@ -53,7 +53,7 @@ process.on("SIGINT", async () => { await shutdown(); process.exit(0); });
 
 - **Promise-shape `agents`** is eagerly resolved at wrap time — no concurrent-first-request race.
 - **`(ctx) => agents` factory shape** is wrapped at request time; each invocation yields freshly-proxied agents (no cross-request talk).
-- **Re-invocation in the same process** with the same `apiUrl + apiKey` returns the same OTEL controller; with a different config it throws (T0 doesn't support silent reconfigure — call `shutdown()` first).
+- **Re-invocation in the same process** is safe — each call produces an independent controller + runtime. There is no global state to coordinate as of 0.2.0-beta.0.
 
 ---
 
@@ -79,7 +79,7 @@ interface OpenBoxMiddlewareOptions {
 
 **Parameters**
 
-- `runtime` — an `OpenBoxRuntimeController` (`{ client, defaults, logger, spanProcessor }`). Pattern 1 builds this for you; Pattern 2 builds it by hand.
+- `runtime` — an `OpenBoxRuntimeController` (`{ client, defaults, logger }`). Pattern 1 builds this for you; Pattern 2 builds it by hand.
 - `opts.enforceApprovals` — default `false` (telemetry-only). When `true`, the middleware awaits `client.evaluate` + `client.pollApproval` once a tool call's args are complete, before emitting the OpenBox `ActivityStarted` record. A block/halt verdict halts the stream and emits a redacted `governance_blocked` envelope (see below).
 - `opts.frontendToolNames` — explicit allowlist of tool names that should record `frontend: true`. Without this (or `isFrontendTool`), every observed tool call records `frontend: false`, `tool_origin: "copilotkit-observed"` — safe default for non-Mastra backends (LangGraph / CrewAI / BuiltIn).
 - `opts.isFrontendTool` — alternative callback form. Wins over `frontendToolNames` if both are set.
@@ -178,64 +178,6 @@ When `agentDid` + `agentPrivateKey` are set, every request signs with five DID i
 
 ---
 
-### `OpenBoxSpanProcessor`
-
-OTEL `SpanProcessor` that buffers spans per workflow and forwards them to the OpenBox Core API as part of the governance evaluation flow.
-
-```ts
-new OpenBoxSpanProcessor({
-  fallbackProcessor?: { onEnd, forceFlush, shutdown };
-  ignoredUrlPrefixes?: string[];
-});
-```
-
-Public methods used by the CopilotKit middleware:
-
-- `registerWorkflow(workflowId, buffer)` — register a new workflow span buffer.
-- `registerTrace(workflowId, runId?, traceId)` — bind a trace id to the workflow.
-- `setActivityContext(workflowId, activityId, ctx)` / `getActivityContext` / `clearActivityContext` — activity-level OTEL `Context` propagation.
-
-The processor implements the full `SpanProcessor` interface (`onStart`, `onEnd`, `forceFlush`, `shutdown`) and is safe to register with any `NodeTracerProvider`. Re-exported as `WorkflowSpanProcessor` for backward compatibility.
-
----
-
-### `setupOpenBoxOpenTelemetry(options)`
-
-Installs the OTEL `NodeTracerProvider` + database / HTTP / file instrumentations + `globalThis.fetch` patching.
-
-```ts
-function setupOpenBoxOpenTelemetry(options: {
-  captureHttpBodies?: boolean;          // default true
-  dbLibraries?: ReadonlySet<string>;
-  fileSkipPatterns?: string[];
-  governanceClient?: OpenBoxClient;
-  ignoredUrls?: string[];
-  instrumentDatabases?: boolean;        // default true
-  instrumentFileIo?: boolean;           // default false
-  onHookApiError?: "fail_open" | "fail_closed";
-  spanProcessor: OpenBoxSpanProcessor;
-}): OpenBoxTelemetryController;
-```
-
-Returns:
-
-```ts
-interface OpenBoxTelemetryController {
-  instrumentations: Instrumentation[];
-  tracerProvider: NodeTracerProvider;
-  shutdown: () => Promise<void>;
-}
-```
-
-**Semantics**
-
-- **Idempotent self-call.** Two calls with the same `governanceClient.apiUrl + apiKey` return the same controller. Two calls with **different** configs throw — call `controller.shutdown()` first.
-- **Peer-tracer-provider skip.** If the global OTEL API has been registered with anything other than the default `ProxyTracerProvider` whose delegate is a `NoopTracerProvider`, logs `[openbox-copilotkit] peer tracer provider detected, skipping OpenBox OTEL install` and returns a no-op controller. (Both "a non-proxy provider is registered" and "a proxy delegating to a non-noop provider is registered" trigger the skip.) `globalThis.fetch` is **not** patched in that case. `client.evaluate(...)` emissions still flow.
-
-See [troubleshooting → peer tracer provider](./troubleshooting.md#6-otel-peer-detect-skip-log-line).
-
----
-
 ## Public types
 
 ### `OpenBoxConfig` / `OpenBoxConfigInput`
@@ -248,8 +190,7 @@ See [troubleshooting → peer tracer provider](./troubleshooting.md#6-otel-peer-
 - `onApiError: "fail_open" | "fail_closed"` — default `fail_open` (governance failure does not block the user).
 - `governanceTimeout: number` (seconds), `evaluateMaxRetries`, `evaluateRetryBaseDelayMs` — wire-level tuning.
 - `skipActivityTypes`, `skipSignals`, `skipWorkflowTypes`, `skipHitlActivityTypes: Set<string>` — coarse filters; merged from `OPENBOX_SKIP_*` env vars (CSV).
-- `httpCapture: boolean` — default `true`; surfaces request/response bodies on captured HTTP spans.
-- `instrumentDatabases`, `instrumentFileIo: boolean` — OTEL instrumentation toggles.
+- `httpCapture: boolean` — default `true`; preserved for shared-schema parity with sibling SDKs. As of 0.2.0-beta.0 this SDK does not capture HTTP/DB/file telemetry — the value is read at config-parse time but has no behavioral effect here.
 
 The remaining `OpenBoxConfigInput` fields — `hitlEnabled` (default `true`), `maxEvaluatePayloadBytes` (default `256_000`), `sendActivityStartEvent` (default `true`), `sendStartEvent` (default `true`), `validate` (default `true`, calls `OpenBoxClient.validateApiKey()` at boot) — are stable internal-tuning knobs. Override via the matching `OPENBOX_*` env var or by passing the field to `parseOpenBoxConfig` / `WithOpenBoxRuntimeConfig`. The full schema lives in `src/config/openbox-config.ts`.
 
@@ -264,7 +205,6 @@ interface OpenBoxRuntimeController {
   client: OpenBoxClient;
   defaults: OpenBoxRuntimeDefaults;     // { agentId?, tenantId?, workflowType? }
   logger: OpenBoxLogger;                // console-style sink
-  spanProcessor: OpenBoxSpanProcessor;
 }
 ```
 
@@ -300,7 +240,6 @@ These pages are **not shipped in 0.1.0-beta.0** by design:
 
 - `architecture.md`, `event-model.md` — content merged into this page (event matrix + emission shape).
 - `approvals-and-guardrails.md` — content merged into `enforceApprovals` section + [troubleshooting](./troubleshooting.md).
-- `telemetry.md` — content merged into `OpenBoxSpanProcessor` + `setupOpenBoxOpenTelemetry` sections.
 - `security-and-privacy.md` — content merged into [installation security & privacy](./installation.md#security-and-privacy-t0) + DID-signing trust note.
 - `configuration.md` — content merged into `OpenBoxConfigInput` field reference.
 

@@ -2,7 +2,11 @@
 
 Server-only governance and observability for [CopilotKit](https://www.copilotkit.ai/) `runtime/v2`. Closes the gaps a per-framework SDK can't see — frontend tools, AG-UI final messages, HITL approvals — by attaching at the CopilotKit boundary. Telemetry-default (records everything, blocks nothing); flip `enforceApprovals: true` to enforce.
 
-> **Independence:** This SDK is standalone. If you also run `@openbox-ai/openbox-mastra-sdk` in the same process, both emit independently — see [`docs/troubleshooting.md`](./docs/troubleshooting.md#8-co-running-with-another-openbox-emitting-sdk-produces-duplicate-events) for the expected co-run behavior.
+> **Independence:** This SDK is standalone. If you also run `@openbox-ai/openbox-mastra-sdk` in the same process, both emit independently — see [`docs/troubleshooting.md`](./docs/troubleshooting.md#co-running-with-another-openbox-emitting-sdk) for the expected co-run behavior.
+
+## Why no OpenTelemetry?
+
+The SDK observes governance-relevant events at the AG-UI middleware boundary (`TOOL_CALL_START`, `RUN_FINISHED`, etc.) and ships them to the OpenBox API via `client.evaluate(payload)`. OpenTelemetry was inherited from a sibling SDK during initial scaffolding but never load-bearing — the buffered spans were never flushed, and no UI consumer depended on them. Dropping OTel in 0.2.0-beta.0 removed ~700 LOC, 19 dependencies, and the entire process-coexistence problem with other OTel-installing SDKs. If your application needs OTel for unrelated reasons, install it yourself — this SDK no longer competes for the global TracerProvider.
 
 ## The adopter diff
 
@@ -49,14 +53,13 @@ One import, one wrap, one `next.config.ts` entry, one optional SIGINT handler.
 - [`docs/api-reference.md`](./docs/api-reference.md) — every public export with signature, parameters, and examples.
 - [`docs/troubleshooting.md`](./docs/troubleshooting.md) — the eight scenarios adopters hit most often.
 
-## What ships in 0.1.0-beta.0 (T0)
+## What ships in 0.2.0-beta.0
 
 - **Public framework API:** `withOpenBoxRuntime`, `createOpenBoxMiddleware`.
-- **Public shared API:** `OpenBoxClient`, `OpenBoxSpanProcessor`, `parseOpenBoxConfig`, `setupOpenBoxOpenTelemetry`.
+- **Public shared API:** `OpenBoxClient`, `parseOpenBoxConfig`.
 - **AG-UI middleware** observing every `TOOL_CALL_*`, `TEXT_MESSAGE_*`, `RUN_*` event and emitting `workflow_type: "copilotkit"`.
 - **Frontend-tool labelling** via explicit `frontendToolNames` allowlist or `isFrontendTool` callback (no heuristic).
 - **DID-signed governance requests** when `OPENBOX_AGENT_DID` + `OPENBOX_AGENT_PRIVATE_KEY` are set.
-- **Idempotent OTEL setup** with generic peer-tracer-provider detection.
 
 Deferred to T1: React HITL companion (`@openbox-ai/openbox-copilotkit-react`), per-verdict enforcement matrices, CopilotKit v1 endpoint factories.
 
