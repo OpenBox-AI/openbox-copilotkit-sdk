@@ -158,6 +158,50 @@ If you want a single event stream, run only one SDK. There is no "co-run de-dupe
 
 ---
 
+## CopilotKit and Mastra show as two separate runs, not one multi-agent run
+
+**Symptom**
+
+You co-run this SDK and `openbox-mastra-sdk` and expected one grouped multi-agent
+run with a parent → child handoff edge. Instead you see two independent sessions and
+no handoff — even though both streams share the same `run_id`.
+
+**Diagnosis**
+
+Multi-agent grouping is **opt-in** and is driven by `sessions.multi_agent_session_id`,
+**not** by a shared `run_id`. Simply co-running two SDKs (scenario 8) never groups
+them. To appear as one run you need all three:
+
+1. `middlewareOptions.multiAgent.enabled: true` on this SDK — stamps
+   `multi_agent_session_id` on the CopilotKit (parent) stream.
+2. A `Handoff` event with `from_agent_did` = parent DID. CopilotKit emits it
+   **parent-side, authenticated as the child** via the child-scoped client
+   (`handoffTools.<tool>.childApiKey`/`childAgentDid`/`childAgentPrivateKey`).
+   Without it, Core never writes a `session_handoffs` row, so no parent → child edge.
+3. The **child runtime** stamping the *same* `multi_agent_session_id` (and
+   `parent_workflow_id`) on its own events — it gets these from the context the
+   parent hands over via `multiAgent.forwardContext`.
+
+If only step 1 is done, the parent session is grouped and a Handoff edge may exist,
+but the child session won't join the group until it receives the forwarded context.
+
+**Fix**
+
+Enable and configure multi-agent mode per
+[Multi-agent delegation (Handoff)](./integration-patterns.md#multi-agent-delegation-handoff):
+register **distinct** parent and child OpenBox agents (separate API keys + DIDs), map
+the delegate tool in `handoffTools` (with child credentials so the parent can emit the
+Handoff as the child), and wire `forwardContext` so the child invocation carries the
+same `multi_agent_session_id`. Reusing one identity for both runtimes produces a
+self-to-self handoff — register two agents.
+
+> Messages not rendering? In multi-agent mode CopilotKit emits **array-shaped**
+> `signal_args` for `user_input`/`agent_output`, which the backend timeline reads
+> directly — no backend change needed. If you see messages missing, confirm
+> `multiAgent.enabled` is actually `true` for that run.
+
+---
+
 ## Still stuck?
 
 - Re-check [installation](./installation.md) for the required Node version and `next.config.ts` entry.

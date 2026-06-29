@@ -6,6 +6,7 @@ import {
   type OpenBoxConfig,
   type OpenBoxConfigInput
 } from "../../config/openbox-config.js";
+import { OpenBoxConfigError } from "../../types/errors.js";
 import type {
   OpenBoxLogger,
   OpenBoxMiddlewareOptions,
@@ -175,6 +176,19 @@ export async function wrapCopilotRuntimeOptions<
 
   const markerSymbol = Symbol("openbox.copilotkit.wrap");
   const middlewareOptions = extras.middlewareOptions;
+
+  // Fail LOUD at setup for a multi-agent misconfig. The per-request middleware
+  // constructor also guards this, but that throw happens at lazy clone-time
+  // inside a swallow-and-warn boundary — which would silently disable ALL
+  // governance for the agent. Validating here surfaces it once, at wrap time.
+  const multiAgent = middlewareOptions?.multiAgent;
+  if (multiAgent?.enabled && !(multiAgent.parentAgentDid ?? client.agentDid)) {
+    throw new OpenBoxConfigError(
+      "OpenBox multi-agent mode is enabled but no parent agent DID is available. " +
+        "Set middlewareOptions.multiAgent.parentAgentDid or configure agentDid/agentPrivateKey."
+    );
+  }
+
   const wrappedAgents = await wrapAgents(options.agents, {
     controller,
     markerSymbol,

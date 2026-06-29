@@ -223,3 +223,34 @@ describe("wrapCopilotRuntimeOptions — middleware composition (happy path)", ()
     await shutdown();
   });
 });
+
+describe("wrapCopilotRuntimeOptions — multi-agent setup validation", () => {
+  it("throws at setup when multiAgent.enabled but no parent DID is resolvable", async () => {
+    const options: CopilotRuntimeOptionsLike = {
+      agents: { support: new FakeAgent("support") }
+    };
+
+    await expect(
+      wrapCopilotRuntimeOptions(options, CONFIG, {
+        middlewareOptions: { multiAgent: { enabled: true } }
+      })
+    ).rejects.toThrow(/parent agent DID/i);
+  });
+
+  it("succeeds when multiAgent.enabled with an explicit parentAgentDid", async () => {
+    const options: CopilotRuntimeOptionsLike = {
+      agents: { support: new FakeAgent("support") }
+    };
+
+    const { shutdown } = await wrapCopilotRuntimeOptions(options, CONFIG, {
+      middlewareOptions: {
+        multiAgent: {
+          enabled: true,
+          parentAgentDid: "did:aip:22222222-2222-2222-2222-222222222222"
+        }
+      }
+    });
+
+    await shutdown();
+  });
+});

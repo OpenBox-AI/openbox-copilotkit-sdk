@@ -18,6 +18,9 @@ coverage/
 # Local reference material
 .reference/
 
+# Claude Code agent tooling / worktrees / memory
+.claude/
+
 # OS/editor files
 .DS_Store
 Thumbs.db

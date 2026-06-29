@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { OpenBoxClient } from "../../../src/client/openbox-client.js";
 import { OpenBoxCopilotKitEmitter } from "../../../src/copilotkit/openbox-emitter.js";
 import { WorkflowEventType } from "../../../src/types/workflow-event-type.js";
 
@@ -185,5 +186,142 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
 
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalled();
+  });
+});
+
+describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
+  it("serializes WorkflowEventType.HANDOFF as 'Handoff'", () => {
+    expect(WorkflowEventType.HANDOFF).toBe("Handoff");
+  });
+
+  it("emits array-shaped signal_args when multiAgentSessionId is set", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+
+    await emitter.emitSignalReceived({
+      multiAgentSessionId: "mas:run-X",
+      payload: "what is the weather in tokyo?",
+      runId: "run-X",
+      signalName: "user_input",
+      workflowId: "thread-X"
+    });
+
+    const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.signal_args).toEqual(["what is the weather in tokyo?"]);
+  });
+
+  it("keeps { value } signal_args when multiAgentSessionId is absent", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+
+    await emitter.emitSignalReceived({
+      payload: "hello",
+      runId: "run-X",
+      signalName: "user_input",
+      workflowId: "thread-X"
+    });
+
+    const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.signal_args).toEqual({ value: "hello" });
+  });
+
+  it("stamps multi_agent_session_id on WorkflowStarted when provided", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+
+    await emitter.emitWorkflowStarted({
+      multiAgentSessionId: "mas:run-X",
+      runId: "run-X",
+      threadId: "thread-X",
+      workflowId: "thread-X"
+    });
+
+    const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.multi_agent_session_id).toBe("mas:run-X");
+  });
+
+  it("omits multi_agent_session_id and parent_workflow_id when not provided", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+
+    await emitter.emitWorkflowStarted({
+      runId: "run-X",
+      threadId: "thread-X",
+      workflowId: "thread-X"
+    });
+
+    const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload).not.toHaveProperty("multi_agent_session_id");
+    expect(payload).not.toHaveProperty("parent_workflow_id");
+  });
+
+  it("stamps parent_workflow_id on WorkflowCompleted (child workflow semantics)", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+
+    await emitter.emitWorkflowCompleted({
+      multiAgentSessionId: "mas:run-X",
+      parentWorkflowId: "parent-wf",
+      runId: "run-X",
+      workflowId: "child-wf"
+    });
+
+    const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.multi_agent_session_id).toBe("mas:run-X");
+    expect(payload.parent_workflow_id).toBe("parent-wf");
+  });
+
+  it("emitHandoff routes to the child-scoped client with the required fields", async () => {
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
+    const childEvaluate = vi.fn().mockResolvedValue(null);
+    const childClient = { evaluate: childEvaluate } as unknown as OpenBoxClient;
+
+    await emitter.emitHandoff(
+      {
+        fromAgentDid: "did:aip:parent",
+        metadata: { delegate_tool_name: "weatherTool" },
+        multiAgentSessionId: "mas:run-X",
+        runId: "run-X",
+        workflowId: "thread-X"
+      },
+      childClient
+    );
+
+    // Authenticated as the child — NOT the parent controller client.
+    expect(evaluateMock).not.toHaveBeenCalled();
+    expect(childEvaluate).toHaveBeenCalledTimes(1);
+    const payload = childEvaluate.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(payload.event_type).toBe(WorkflowEventType.HANDOFF);
+    expect(payload.from_agent_did).toBe("did:aip:parent");
+    expect(payload.multi_agent_session_id).toBe("mas:run-X");
+    expect(payload.workflow_type).toBe("copilotkit");
+    expect(payload.task_queue).toBe("copilotkit");
+    expect(
+      (payload.metadata as Record<string, unknown>).delegate_tool_name
+    ).toBe("weatherTool");
+  });
+
+  it("emitHandoff without a client notifies onEvent but does not evaluate (context-export)", async () => {
+    const onEvent = vi.fn();
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, onEvent);
+
+    const result = await emitter.emitHandoff({
+      fromAgentDid: "did:aip:parent",
+      multiAgentSessionId: "mas:run-X",
+      runId: "run-X",
+      workflowId: "thread-X"
+    });
+
+    expect(result).toBeNull();
+    expect(evaluateMock).not.toHaveBeenCalled();
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    const arg = onEvent.mock.calls[0]?.[0] as {
+      eventType: string;
+      payload: Record<string, unknown>;
+    };
+    expect(arg.eventType).toBe(WorkflowEventType.HANDOFF);
+    expect(arg.payload.from_agent_did).toBe("did:aip:parent");
   });
 });

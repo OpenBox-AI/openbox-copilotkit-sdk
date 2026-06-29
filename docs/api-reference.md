@@ -73,6 +73,7 @@ interface OpenBoxMiddlewareOptions {
   enforceApprovals?: boolean;
   frontendToolNames?: string[];
   isFrontendTool?: (call: { name: string }) => boolean;
+  multiAgent?: OpenBoxMultiAgentOptions;
   onEvent?: (emission: OpenBoxEmission) => void;
 }
 ```
@@ -84,6 +85,7 @@ interface OpenBoxMiddlewareOptions {
 - `opts.frontendToolNames` — explicit allowlist of tool names that should record `frontend: true`. Without this (or `isFrontendTool`), every observed tool call records `frontend: false`, `tool_origin: "copilotkit-observed"` — safe default for non-Mastra backends (LangGraph / CrewAI / BuiltIn).
 - `opts.isFrontendTool` — alternative callback form. Wins over `frontendToolNames` if both are set.
 - `opts.onEvent` — fired for every emission with `{ activityId?, eventType, payload, workflowId }`. Optional sink for sidecar telemetry pipelines.
+- `opts.multiAgent` — opt into multi-agent grouping. Default disabled. When `enabled`, every event carries a shared `multi_agent_session_id` (default `mas:${runId}`), timeline signals switch to backend-compatible array shape, and a configured delegation tool emits a `Handoff` (`WorkflowEventType.HANDOFF`) marking the parent → child edge. `forwardContext(ctx)` bridges the grouping context to the child runtime. See [Multi-agent delegation](./integration-patterns.md#multi-agent-delegation-handoff) for the identity model, `handoffTools` / `resolveHandoff` / `forwardContext`, and parent-side vs context-export emission.
 
 #### AG-UI event → OpenBox emission
 
@@ -100,6 +102,8 @@ interface OpenBoxMiddlewareOptions {
 | upstream observable error | `WorkflowFailed` then `subscriber.error(err)` |
 
 Every tool-call emission carries `tool_origin: "copilotkit-observed"` so downstream pipelines can distinguish CopilotKit-boundary observations from backend-side emissions (e.g. when `openbox-mastra-sdk` is also wired).
+
+When `multiAgent.enabled` and the `TOOL_CALL_END` tool maps to a configured subagent, the middleware emits one `Handoff` immediately after that tool's `ActivityStarted` (deduplicated per delegation). See [Multi-agent delegation](./integration-patterns.md#multi-agent-delegation-handoff).
 
 #### `enforceApprovals` and the `governance_blocked` envelope
 
