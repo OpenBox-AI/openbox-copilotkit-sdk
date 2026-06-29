@@ -1,0 +1,8 @@
+{
+  "verdict": "constrain",
+  "reason": "Redact PII and rewrite amount",
+  "constraints": [
+    { "type": "redact", "path": "$.user.email" },
+    { "type": "rewrite", "path": "$.amount", "value": 100 }
+  ]
+}

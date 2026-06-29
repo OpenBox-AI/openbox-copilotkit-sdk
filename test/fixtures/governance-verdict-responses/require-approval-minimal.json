@@ -1,0 +1,5 @@
+{
+  "verdict": "require_approval",
+  "reason": "Spend above auto-approve threshold",
+  "approval_id": "appr-123"
+}

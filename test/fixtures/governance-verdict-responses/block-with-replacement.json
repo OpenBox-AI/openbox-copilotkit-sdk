@@ -1,0 +1,9 @@
+{
+  "verdict": "block",
+  "reason": "PII detected in tool input",
+  "metadata": {
+    "replacement_content": {
+      "message": "I cannot perform that action because it would expose sensitive data."
+    }
+  }
+}

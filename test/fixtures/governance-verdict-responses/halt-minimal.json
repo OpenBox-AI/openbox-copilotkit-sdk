@@ -1,0 +1,4 @@
+{
+  "verdict": "halt",
+  "reason": "Critical safety condition triggered"
+}

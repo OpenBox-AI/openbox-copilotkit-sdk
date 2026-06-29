@@ -1,0 +1,9 @@
+{
+  "verdict": "block",
+  "reason": "Returning safe fallback tool result",
+  "metadata": {
+    "replacement_content": {
+      "tool_result": { "ok": false, "error": "blocked_by_policy" }
+    }
+  }
+}

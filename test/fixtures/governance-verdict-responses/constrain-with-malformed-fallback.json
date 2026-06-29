@@ -1,0 +1,8 @@
+{
+  "verdict": "constrain",
+  "reason": "Mixed-shape constraints from Core",
+  "constraints": [
+    { "type": "redact", "path": "$.password" },
+    { "type": "unknown-op", "details": "should fall back to raw_constraint" }
+  ]
+}

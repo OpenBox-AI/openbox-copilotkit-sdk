@@ -1,0 +1,8 @@
+{
+  "verdict": "require_approval",
+  "reason": "Approve with constraints",
+  "approval_id": "appr-456",
+  "constraints": [
+    { "type": "redact", "path": "$.token" }
+  ]
+}

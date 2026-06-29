@@ -1,0 +1,10 @@
+{
+  "verdict": "constrain",
+  "reason": "Restrict tool args to allowlist",
+  "constraints": [
+    {
+      "type": "narrow-tool-args",
+      "args": { "scope": "read_only" }
+    }
+  ]
+}
