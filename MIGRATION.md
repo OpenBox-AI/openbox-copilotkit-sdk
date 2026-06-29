@@ -25,11 +25,26 @@
    { "event_type": "ActivityStarted", "activity_id": "call_1",
      "activity_type": "function_call",
      "hook_trigger": true,
-     "spans": [ { "name": "tool:weatherTool", "stage": "completed",
-                  "attributes": { "openbox.semantic_type": "function_call", "...": "..." } } ] }
+     "attempt": 1,
+     "spans": [{
+       "name": "tool:weatherTool",
+       "span_id": "...", "trace_id": "...",
+       "start_time": 1750000000000000000,
+       "end_time":   1750000000123000000,
+       "duration_ns": 123000000,
+       "status": { "code": "OK" },
+       "stage": "completed",
+       "kind": "INTERNAL",
+       "semantic_type": "function_call",
+       "hook_type": "function_call",
+       "function": "weatherTool",
+       "events": [],
+       "attributes": { "tool.name": "weatherTool", "tool.call_id": "call_1", "openbox.enforcement_owner": "openbox-copilotkit", "...": "..." }
+     }]
+   }
    ```
 
-   The hook event intentionally omits `activity_output` (`ActivityStarted` never carries outputs in openbox-core's accepted shape) and stores the hook stage on `span.stage` (openbox-core derives `hook_stage` from there).
+   The wire shape is taken from `openbox-core/internal/content/governance.go:SpanData` and mirrors what `openbox-mastra-sdk`'s `createHookSpan` produces. Notable transforms vs the internal `SpanData` type (`@openbox-ai/openbox-copilotkit`'s `SpanData` export, kept stable so `SpanBuffer` consumers are unaffected): `start_time_unix_nano` (bigint) → `start_time` (JSON number); `end_time_unix_nano` (bigint) → `end_time` (JSON number); `status: "ok"|"error"` (string) → `status: { code: "OK"|"ERROR" }` (struct). Top-level `semantic_type`, `hook_type`, `kind`, `events: []` are added because openbox-core's Go schema requires them at the top level (not inside `attributes`). Timestamps ship as JSON numbers because openbox-core unmarshals them into `int64` (it rejects strings). The hook event omits `activity_output` (rejected on `ActivityStarted` by openbox-core).
 
    Span timestamps (`start_time_unix_nano` / `end_time_unix_nano`) are coerced to OTel-JSON decimal strings on the wire so the payload remains JSON-serializable. The `SpanBuffer` keeps the raw `bigint` shape.
 

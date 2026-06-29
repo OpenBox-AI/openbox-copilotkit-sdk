@@ -82,7 +82,6 @@ export interface ActivityCompletedHookInput {
   agentId?: string | undefined;
   durationMs?: number | undefined;
   endTime?: number | undefined;
-  frontend: boolean;
   goal?: string | undefined;
   metadata?: Record<string, unknown> | undefined;
   runId: string;
@@ -252,19 +251,18 @@ export class OpenBoxCopilotKitEmitter {
   public async emitActivityCompletedHook(
     input: ActivityCompletedHookInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const wireSpan = serializeSpan(input.span);
-    wireSpan.stage = "completed";
+    const wireSpan = toWireSpan(input.span);
     const payload = withBaseEnvelope({
       activity_id: input.activityId,
       activity_input: serializeActivityInput(input.activityArgs),
       activity_type: "function_call",
       ...(input.agentId ? { agent_id: input.agentId } : {}),
+      attempt: 1,
       ...(typeof input.durationMs === "number"
         ? { duration_ms: input.durationMs }
         : {}),
       ...(typeof input.endTime === "number" ? { end_time: input.endTime } : {}),
       event_type: WorkflowEventType.ACTIVITY_STARTED,
-      frontend: input.frontend,
       ...(input.goal ? { goal: input.goal } : {}),
       hook_trigger: true,
       ...(input.metadata ? { metadata: input.metadata } : {}),
@@ -422,36 +420,54 @@ function serializeActivityOutput(value: unknown): unknown {
 }
 
 /**
- * Coerce a `SpanData`'s `bigint` nano-time fields to decimal strings.
+ * Transform an internal `SpanData` into the wire shape openbox-core's
+ * `GovernanceEventPayload.Spans` array expects. The internal `SpanData`
+ * mirrors the OTel JSON convention (`start_time_unix_nano: bigint`,
+ * `status: "ok"|"error"`); openbox-core's Go schema uses different field
+ * names and types (`start_time: int64`, `status: { code: "OK"|"ERROR" }`,
+ * top-level `semantic_type` / `hook_type` / `kind`). Validated empirically
+ * against `openbox-core/internal/content/governance.go:SpanData` and the
+ * `function_call` shape that `openbox-mastra-sdk`'s `createHookSpan`
+ * produces (the only shape openbox-core has been observed to accept for
+ * inline spans).
  *
- * `JSON.stringify` throws on any `bigint`, and `OpenBoxClient.evaluate`
- * serializes the entire payload before POSTing it. The wire format follows
- * the OTel JSON convention of representing 64-bit nano-second timestamps as
- * decimal-encoded strings — this keeps full precision (Number can't hold
- * `2^63 - 1`) and matches what openbox-core's indexers expect.
- *
- * The `SpanBuffer` itself still holds the raw `bigint` shape — this coercion
- * is scoped to the wire boundary only.
+ * Nano-time fields ship as JS Numbers — openbox-core unmarshals JSON
+ * numbers into `int64` (it rejects strings). Numbers larger than 2^53 lose
+ * trailing-ns precision, which is acceptable for tracing in the current era.
+ * The internal `SpanBuffer` keeps the raw `bigint` shape — this transform
+ * applies only at the wire boundary.
  */
-function serializeSpan(span: unknown): Record<string, unknown> {
-  if (span === null || typeof span !== "object") {
-    return span as Record<string, unknown>;
+function toWireSpan(span: SpanData): Record<string, unknown> {
+  const startTime = Number(span.start_time_unix_nano);
+  const endTime = Number(span.end_time_unix_nano);
+  const attrs = { ...span.attributes } as Record<string, unknown>;
+  const toolNameAttr = attrs["tool.name"];
+  const toolName = typeof toolNameAttr === "string" ? toolNameAttr : undefined;
+
+  const wire: Record<string, unknown> = {
+    attributes: attrs,
+    duration_ns: Math.max(0, endTime - startTime),
+    end_time: endTime,
+    events: [],
+    ...(toolName ? { function: toolName } : {}),
+    hook_type: "function_call",
+    kind: "INTERNAL",
+    name: span.name,
+    semantic_type: "function_call",
+    span_id: span.span_id,
+    stage: "completed",
+    start_time: startTime,
+    status: {
+      code: span.status === "error" ? "ERROR" : "OK"
+    },
+    trace_id: span.trace_id
+  };
+
+  if (span.parent_span_id) {
+    wire.parent_span_id = span.parent_span_id;
   }
-  const source = span as Record<string, unknown>;
-  const result: Record<string, unknown> = {};
-  for (const key of Object.keys(source)) {
-    const value = source[key];
-    if (typeof value === "bigint") {
-      result[key] = value.toString(10);
-    } else if (Array.isArray(value)) {
-      result[key] = (value as unknown[]).map((item: unknown): unknown =>
-        item !== null && typeof item === "object" ? serializeSpan(item) : item
-      );
-    } else {
-      result[key] = value;
-    }
-  }
-  return result;
+
+  return wire;
 }
 
 function safeSerialize(value: unknown): unknown {

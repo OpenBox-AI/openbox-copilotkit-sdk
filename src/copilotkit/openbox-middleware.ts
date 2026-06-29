@@ -541,7 +541,6 @@ export class OpenBoxMiddleware extends Middleware {
         agentId,
         durationMs: Math.max(0, endTime - entry.startTime),
         endTime,
-        frontend: entry.frontend,
         goal,
         metadata,
         runId: state.runId,
