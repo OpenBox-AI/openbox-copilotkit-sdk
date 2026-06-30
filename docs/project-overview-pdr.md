@@ -1,7 +1,7 @@
 # OpenBox CopilotKit SDK — Project Overview & PDR
 
-**Version**: 0.3.0-beta.0
-**Updated**: 2026-06-29  
+**Version**: 0.3.0
+**Updated**: 2026-06-30
 **License**: MIT
 
 ## What & Why
@@ -34,7 +34,7 @@
 - **API key format**: Regex `^obx_(live|test)_[a-zA-Z0-9_]+$`; fail-open if missing.
 - **DID validation**: Optional pair `OPENBOX_AGENT_DID` + `OPENBOX_AGENT_PRIVATE_KEY` (base64 32-byte Ed25519 seed); both or neither.
 - **URL security**: Reject HTTP unless host is localhost/127.0.0.1/::1.
-- **httpCapture field**: Reserved for future use; currently inert (no behavioral effect in 0.2.0–0.3.0-beta.0).
+- **httpCapture field**: Reserved for future use; currently inert (no behavioral effect in 0.2.0–0.3.0).
 
 ### Multi-Agent Support
 

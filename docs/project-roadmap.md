@@ -1,7 +1,7 @@
 # Project Roadmap
 
-**Last Updated**: 2026-06-29  
-**Current Version**: 0.3.0-beta.0
+**Last Updated**: 2026-06-30
+**Current Version**: 0.3.0
 **Stable Release Target**: 0.5.0 (Q3 2026 estimate)
 
 ## Version History
@@ -27,7 +27,7 @@
 
 ---
 
-## 0.3.0-beta.0 (Current, June 2026)
+## 0.3.0 (Current, June 2026)
 
 ### Phase 1: Verdict Implementation (Jun–Jul 2026)
 
@@ -88,7 +88,7 @@
 
 **Requirements**:
 - [ ] `ActivityStarted`-shaped hook event for each buffered span
-- [ ] Opt-in via `middlewareOptions.spanBuffer` (default: false in 0.3.0-beta.0)
+- [ ] Opt-in via `middlewareOptions.spanBuffer` (default: false in 0.3.0)
 - [ ] Ship on `RUN_FINISHED` or manual `drain()` call
 - [ ] DID-sign span payload (same canonical request as governance eval)
 - [ ] Retry logic (inherit from client)
@@ -206,7 +206,7 @@
 
 ## Metrics & Success Criteria (By Release)
 
-| Metric | 0.2.0 | 0.3.0-beta | 0.4.0 | 0.5.0 | Notes |
+| Metric | 0.2.0 | 0.3.0 | 0.4.0 | 0.5.0 | Notes |
 |--------|-------|-----------|-------|-------|-------|
 | **Verdict applier coverage** | 2/5 (allow, block) | 2/5 | 3/5 (+ constrain) | 5/5 (+ approval, halt) | Deferred phases |
 | **Span synthesis** | Foundation only | ✓ + audit envelope | ✓ + transport | ✓ | Phase 2 → 2b |
@@ -220,9 +220,7 @@
 
 ```
 Jun 2026:  0.2.0-beta.0 shipped (OTel removed)
-Jul 2026:  0.3.0-beta.0 Phase 1 (verdict routing)
-Aug 2026:  0.3.0-beta.0 Phase 2 (span synthesis + buffer)
-Sep 2026:  0.3.0 stable release candidate
+Jun 2026:  0.3.0 shipped (verdict routing + span synthesis)
 Sep 2026:  0.4.0-beta.0 (constrain applier)
 Oct 2026:  0.5.0-beta.0 (approval + halt)
 Nov 2026:  0.5.0 stable release (MVP complete)

@@ -4,7 +4,7 @@
 
 - No changes yet.
 
-## 0.3.0-beta.0 — 2026-06-29
+## 0.3.0 — 2026-06-30
 
 ### Added — verdict surface (Phase 1)
 
