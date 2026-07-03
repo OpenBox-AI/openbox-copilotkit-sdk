@@ -1,0 +1,14 @@
+# OpenBox demo — CrewAI × CopilotKit agent.
+#
+# Points at the LOCAL forked AG-UI CrewAI bridge (the crewai 1.x port on the
+# OpenBox-AI/ag-ui fork, branch feat/crewai-1.x). The editable path means bridge
+# fixes on disk flow straight into this demo — which is the point right now:
+# reproduce the crewai 1.x deepcopy issue here and iterate.
+#
+# Once that fork is pushed this becomes:
+#   ag-ui-crewai @ git+https://github.com/OpenBox-AI/ag-ui.git@feat/crewai-1.x#subdirectory=integrations/crew-ai/python
+#
+# The bridge brings crewai[litellm] (^1.14), ag-ui-protocol, and fastapi.
+-e ../../../../ag-ui/integrations/crew-ai/python
+python-dotenv>=1.2.2
+uvicorn>=0.34.3

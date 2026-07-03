@@ -6,6 +6,17 @@ dist/
 coverage/
 *.tsbuildinfo
 .eslintcache
+.next/
+out/
+
+# Python (demos)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
 
 # Package artifacts
 *.tgz

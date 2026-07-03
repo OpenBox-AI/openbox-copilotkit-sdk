@@ -1,0 +1,8 @@
+weather_task:
+  description: >
+    The user wants the current weather for the city named "{location}".
+    Call your get_weather tool with that city name to fetch the live conditions,
+    then report them back in a friendly, concise way.
+  expected_output: >
+    A short, friendly summary of the current weather in the city "{location}".
+  agent: weather_assistant
