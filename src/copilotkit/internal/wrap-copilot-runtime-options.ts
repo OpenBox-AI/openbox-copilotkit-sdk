@@ -1,11 +1,6 @@
 import type { AbstractAgent } from "@ag-ui/client";
 
-import { OpenBoxClient } from "../../client/openbox-client.js";
-import {
-  parseOpenBoxConfig,
-  type OpenBoxConfig,
-  type OpenBoxConfigInput
-} from "../../config/openbox-config.js";
+import type { OpenBoxConfigInput } from "../../config/openbox-config.js";
 import { OpenBoxConfigError } from "../../types/errors.js";
 import type {
   OpenBoxLogger,
@@ -19,11 +14,13 @@ import {
   type AfterRequestMiddlewareParametersLike,
   type OpenBoxAfterRequestOptions
 } from "./after-request.js";
+import { buildBaseRuntime } from "./base-runtime-builder.js";
 import {
   openBoxBeforeRequest,
   type BeforeRequestMiddlewareParametersLike,
   type OpenBoxBeforeRequestOptions
 } from "./before-request.js";
+import { ServerToolOwnershipRegistry } from "./server-tool-ownership.js";
 import { wrapAgentInProxy } from "./wrap-agent-in-proxy.js";
 
 /** Structural projection of a CopilotKit agents factory context. */
@@ -81,6 +78,13 @@ export interface WrapCopilotRuntimeOptionsExtras {
   afterRequest?: OpenBoxAfterRequestOptions | undefined;
   /** Options passed through to `openBoxBeforeRequest` per request. */
   beforeRequest?: OpenBoxBeforeRequestOptions | undefined;
+  /**
+   * Perform a real `GET /api/v1/auth/validate` round-trip at setup time.
+   * Default `false` — construction never performs a network call unless this
+   * is explicitly enabled. Distinct from the base config's own `validate`
+   * flag, which is format/shape validation only (no network).
+   */
+  validateApiKeyAtStartup?: boolean | undefined;
 }
 
 /**
@@ -151,14 +155,19 @@ export async function wrapCopilotRuntimeOptions<
   configInput: OpenBoxConfigInput = {},
   extras: WrapCopilotRuntimeOptionsExtras = {}
 ): Promise<WrapCopilotRuntimeOptionsResult<TOptions>> {
-  const config: OpenBoxConfig = parseOpenBoxConfig(configInput);
   const logger = extras.logger ?? DEFAULT_LOGGER;
-  const client = buildClient(config);
+  const { runtime, runContext, shutdown } = buildBaseRuntime(configInput, { logger });
+
+  if (extras.validateApiKeyAtStartup) {
+    await runtime.client.validateApiKey();
+  }
 
   const controller: OpenBoxRuntimeController = {
-    client,
+    runtime,
+    runContext,
     defaults: extras.defaults ?? {},
-    logger
+    logger,
+    serverToolOwnership: new ServerToolOwnershipRegistry()
   };
 
   const markerSymbol = Symbol("openbox.copilotkit.wrap");
@@ -166,7 +175,7 @@ export async function wrapCopilotRuntimeOptions<
 
   // Fail loudly at setup for multi-agent identity misconfiguration.
   const multiAgent = middlewareOptions?.multiAgent;
-  if (multiAgent?.enabled && !(multiAgent.parentAgentDid ?? client.agentDid)) {
+  if (multiAgent?.enabled && !(multiAgent.parentAgentDid ?? runtime.config.agentDid)) {
     throw new OpenBoxConfigError(
       "OpenBox multi-agent mode is enabled but no parent agent DID is available. " +
         "Set middlewareOptions.multiAgent.parentAgentDid or configure agentDid/agentPrivateKey."
@@ -200,28 +209,7 @@ export async function wrapCopilotRuntimeOptions<
     beforeRequestMiddleware: wrappedBefore
   } as unknown as WrappedCopilotRuntimeOptions<TOptions>;
 
-  let shutdownPromise: Promise<void> | undefined;
-  const shutdown = async () => {
-    if (!shutdownPromise) {
-      shutdownPromise = Promise.resolve();
-    }
-    await shutdownPromise;
-  };
-
   return { controller, options: nextOptions, shutdown };
-}
-
-function buildClient(config: OpenBoxConfig): OpenBoxClient {
-  return new OpenBoxClient({
-    agentDid: config.agentDid,
-    agentPrivateKey: config.agentPrivateKey,
-    apiKey: config.apiKey,
-    apiUrl: config.apiUrl,
-    evaluateMaxRetries: config.evaluateMaxRetries,
-    evaluateRetryBaseDelayMs: config.evaluateRetryBaseDelayMs,
-    onApiError: config.onApiError,
-    timeoutSeconds: config.governanceTimeout
-  });
 }
 
 interface WrapAgentsContext {

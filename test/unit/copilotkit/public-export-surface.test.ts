@@ -1,7 +1,16 @@
+import { mkdirSync, readFileSync, writeFileSync, existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
+import * as clientPublic from "../../../src/client/index.js";
+import * as configPublic from "../../../src/config/index.js";
 import * as copilotkitPublic from "../../../src/copilotkit/index.js";
+import * as governancePublic from "../../../src/governance/index.js";
+import * as identityPublic from "../../../src/identity/index.js";
 import * as rootPublic from "../../../src/index.js";
+import * as typesPublic from "../../../src/types/index.js";
 
 const REQUIRED_FRAMEWORK_EXPORTS = [
   "createOpenBoxMiddleware",
@@ -105,5 +114,51 @@ describe("src/index.ts root public surface", () => {
         expect(Symbol.keyFor(value)).not.toBe("openbox.copilotkit.runtime");
       }
     }
+  });
+});
+
+/**
+ * FREEZE (Phase 1). Snapshot the runtime-value export names of every published
+ * subpath (`.`, `./client`, `./config`, `./copilotkit`, `./governance`,
+ * `./identity`, `./types`) so that Phase 6's facade thinning (deleting the
+ * duplicated `client`/`config`/`identity`/`types` implementations, removing the
+ * `src/verdict/*` public exports per RT-F7) shows up as a reviewed diff to this
+ * baseline rather than an accidental break. Type-only exports are erased at
+ * runtime and are intentionally not captured here.
+ */
+const SUBPATH_NAMESPACES: Record<string, Record<string, unknown>> = {
+  ".": rootPublic as Record<string, unknown>,
+  "./client": clientPublic as Record<string, unknown>,
+  "./config": configPublic as Record<string, unknown>,
+  "./copilotkit": copilotkitPublic as Record<string, unknown>,
+  "./governance": governancePublic as Record<string, unknown>,
+  "./identity": identityPublic as Record<string, unknown>,
+  "./types": typesPublic as Record<string, unknown>
+};
+
+const SURFACE_SNAPSHOT_PATH = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../fixtures/public-export-surface-baseline.json"
+);
+
+describe("public export surface — all-subpath runtime snapshot", () => {
+  it("matches the committed baseline for all 7 subpaths", () => {
+    const surface: Record<string, string[]> = {};
+    for (const [subpath, ns] of Object.entries(SUBPATH_NAMESPACES)) {
+      surface[subpath] = Object.keys(ns)
+        .filter(key => key !== "default")
+        .sort();
+    }
+    const serialized = JSON.stringify(surface, null, 2) + "\n";
+
+    if (!existsSync(SURFACE_SNAPSHOT_PATH)) {
+      mkdirSync(dirname(SURFACE_SNAPSHOT_PATH), { recursive: true });
+      writeFileSync(SURFACE_SNAPSHOT_PATH, serialized, "utf8");
+      throw new Error(
+        `Export-surface baseline generated at ${SURFACE_SNAPSHOT_PATH}. Review and re-run.`
+      );
+    }
+
+    expect(serialized).toBe(readFileSync(SURFACE_SNAPSHOT_PATH, "utf8"));
   });
 });

@@ -3,7 +3,7 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { EventType, type BaseEvent } from "@ag-ui/client";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createOpenBoxMiddleware } from "../../src/copilotkit/openbox-middleware.js";
 
@@ -13,6 +13,23 @@ import {
   buildRunAgentInput,
   collectEvents
 } from "../unit/copilotkit/test-utils.js";
+
+function flushMacrotask(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+}
+
+function defer<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>(res => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
 
 const SNAPSHOT_PATH = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -109,5 +126,62 @@ describe("evaluate() payload baseline", () => {
 
     const expected = readFileSync(SNAPSHOT_PATH, "utf8");
     expect(serialized).toBe(expected);
+  });
+});
+
+/**
+ * FREEZE (Phase 1 — defect B4). The 0.3.0 middleware forwards each AG-UI event
+ * to the user stream only *after* awaiting that event's `client.evaluate()`,
+ * and serially (the `pendingHandling` chain in `#processStream`). So a slow or
+ * hung Core throttles the user-visible stream even in telemetry-only mode.
+ *
+ * This test blocks the FIRST evaluate (RUN_STARTED's WorkflowStarted) and shows
+ * the entire downstream stream stalls — no events reach the subscriber until
+ * evaluate resolves. Phase 3 INVERTS this: a bounded non-blocking telemetry
+ * queue forwards events without awaiting Core.
+ */
+describe("telemetry ordering baseline (defect B4, frozen)", () => {
+  it("does not forward ANY AG-UI event until the in-flight evaluate resolves", async () => {
+    const firstEvaluate = defer<null>();
+    let calls = 0;
+    const evaluateMock = vi.fn().mockImplementation(() => {
+      calls += 1;
+      return calls === 1 ? firstEvaluate.promise : Promise.resolve(null);
+    });
+
+    const { controller } = buildController({ evaluateMock });
+    const middleware = createOpenBoxMiddleware(controller, { frontendToolNames: [] });
+    const agent = new ScriptedAgent({ events: canonicalTextRun });
+
+    const forwarded: BaseEvent[] = [];
+    let completed = false;
+    const done = defer<void>();
+    const subscription = middleware.run(buildRunAgentInput(), agent).subscribe({
+      complete: () => {
+        completed = true;
+        done.resolve();
+      },
+      error: () => done.resolve(),
+      next: event => {
+        forwarded.push(event);
+      }
+    });
+
+    // Let all microtasks drain while the first evaluate is still pending.
+    await flushMacrotask();
+
+    // BUG B4: the stream is blocked on telemetry — nothing forwarded yet.
+    expect(calls).toBeGreaterThanOrEqual(1);
+    expect(forwarded).toHaveLength(0);
+    expect(completed).toBe(false);
+    // PHASE-3 WILL INVERT: telemetry-only mode forwards events without awaiting Core.
+
+    // Release Core; the whole serial chain now drains to completion.
+    firstEvaluate.resolve(null);
+    await done.promise;
+
+    expect(forwarded.length).toBeGreaterThan(0);
+    expect(completed).toBe(true);
+    subscription.unsubscribe();
   });
 });

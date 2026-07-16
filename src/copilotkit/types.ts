@@ -1,5 +1,9 @@
-import type { OpenBoxClient } from "../client/openbox-client.js";
+import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
+
 import type { SpanBuffer } from "../spans/span-buffer.js";
+
+import type { RunContextStore } from "./internal/run-context-store.js";
+import type { ServerToolOwnershipRegistry } from "./internal/server-tool-ownership.js";
 
 /**
  * Lightweight logger contract. Module-local; matches a console-style surface
@@ -23,11 +27,23 @@ export interface OpenBoxRuntimeDefaults {
   workflowType?: string | undefined;
 }
 
-/** Wire-level dependencies attached to an OpenBox-wrapped CopilotRuntime. */
+/**
+ * Wire-level dependencies attached to an OpenBox-wrapped CopilotRuntime.
+ *
+ * `runtime` is the ONE base `OpenBoxRuntime` this controller owns (config,
+ * client, adapter, and the base per-runtime `ContextStore` all live on it —
+ * see `internal/base-runtime-builder.ts`). `runContext` is a SEPARATE,
+ * small, controller-owned per-run store (Decision D7) — do not conflate the
+ * two. `serverToolOwnership` is a run-scoped `(runId, toolCallId)` registry
+ * the server-tool wrapper (Phase 5) claims to suppress a duplicate AG-UI
+ * observation for the same call.
+ */
 export interface OpenBoxRuntimeController {
-  client: OpenBoxClient;
+  runtime: OpenBoxRuntime;
+  runContext: RunContextStore;
   defaults: OpenBoxRuntimeDefaults;
   logger: OpenBoxLogger;
+  serverToolOwnership: ServerToolOwnershipRegistry;
 }
 
 /**

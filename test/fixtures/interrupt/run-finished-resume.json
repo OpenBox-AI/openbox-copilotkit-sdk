@@ -1,0 +1,23 @@
+{
+  "description": "The subsequent RESUME run after the run-finished-interrupt fixture. A fresh run (parentRunId links it to the interrupted run) whose forwardedProps carry the resume entry keyed by the interrupt `id` (interruptId). The resumed run completes the previously-suspended tool and finishes successfully. Used by Phase 4 to verify resume correlation keys on interruptId.",
+  "runInput": {
+    "threadId": "thread-1",
+    "runId": "run-2",
+    "parentRunId": "run-1",
+    "forwardedProps": {
+      "resume": [
+        { "interruptId": "call-approve-1", "status": "resolved", "payload": { "approved": true } }
+      ]
+    }
+  },
+  "events": [
+    { "type": "TOOL_CALL_START", "toolCallId": "call-approve-1", "toolCallName": "deleteAccount" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-approve-1", "delta": "{\"userId\":\"u1\"}" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-approve-1" },
+    { "type": "TOOL_CALL_RESULT", "toolCallId": "call-approve-1", "content": "{\"deleted\":true}" },
+    { "type": "TEXT_MESSAGE_START", "messageId": "msg-2", "role": "assistant" },
+    { "type": "TEXT_MESSAGE_CONTENT", "messageId": "msg-2", "delta": "Account deleted." },
+    { "type": "TEXT_MESSAGE_END", "messageId": "msg-2" },
+    { "type": "RUN_FINISHED", "threadId": "thread-1", "runId": "run-2", "outcome": { "type": "success" } }
+  ]
+}

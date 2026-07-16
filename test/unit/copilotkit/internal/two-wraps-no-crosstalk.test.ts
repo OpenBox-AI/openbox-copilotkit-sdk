@@ -112,8 +112,8 @@ describe("two wraps over the same agent record — controller isolation", () => 
 
     const evalA = vi.fn(async (_payload: Record<string, unknown>) => null);
     const evalB = vi.fn(async (_payload: Record<string, unknown>) => null);
-    (wrapA.controller.client as unknown as { evaluate: typeof evalA }).evaluate = evalA;
-    (wrapB.controller.client as unknown as { evaluate: typeof evalB }).evaluate = evalB;
+    (wrapA.controller.runtime.client as unknown as { evaluate: typeof evalA }).evaluate = evalA;
+    (wrapB.controller.runtime.client as unknown as { evaluate: typeof evalB }).evaluate = evalB;
 
     const agentsA = wrapA.options.agents as Record<string, AbstractAgent>;
     const agentsB = wrapB.options.agents as Record<string, AbstractAgent>;

@@ -96,7 +96,7 @@ describe("middleware composition — try/finally semantics", () => {
     );
 
     const evaluateMock = vi.fn(async (_payload: Record<string, unknown>) => null);
-    (controller.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
+    (controller.runtime.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
       evaluateMock;
 
     const runtime = buildRuntime(controller);
@@ -162,7 +162,7 @@ describe("middleware composition — try/finally semantics", () => {
     );
 
     const evaluateMock = vi.fn(async (_payload: Record<string, unknown>) => null);
-    (controller.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
+    (controller.runtime.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
       evaluateMock;
 
     const runtime = buildRuntime(controller);

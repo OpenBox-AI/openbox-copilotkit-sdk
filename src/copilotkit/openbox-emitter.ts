@@ -1,4 +1,7 @@
-import type { OpenBoxClient } from "../client/openbox-client.js";
+import type { JsonValue } from "@openbox-ai/openbox-sdk-ts";
+import type { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+
+import type { OpenBoxClient as LegacyOpenBoxClient } from "../client/openbox-client.js";
 import type { SpanData } from "../spans/index.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { WorkflowEventType } from "../types/workflow-event-type.js";
@@ -141,11 +144,11 @@ export class OpenBoxCopilotKitEmitter {
   readonly #onEvent: OpenBoxMiddlewareOptions["onEvent"];
 
   public constructor(
-    runtime: OpenBoxRuntimeController,
+    controller: OpenBoxRuntimeController,
     onEvent: OpenBoxMiddlewareOptions["onEvent"]
   ) {
-    this.#client = runtime.client;
-    this.#logger = runtime.logger;
+    this.#client = controller.runtime.client;
+    this.#logger = controller.logger;
     this.#onEvent = onEvent;
   }
 
@@ -350,7 +353,7 @@ export class OpenBoxCopilotKitEmitter {
    */
   public async emitHandoff(
     input: HandoffEmitInput,
-    client?: OpenBoxClient
+    client?: LegacyOpenBoxClient
   ): Promise<GovernanceVerdictResponse | null> {
     // Keep invalid handoff markers off the wire.
     if (!input.fromAgentDid || !input.multiAgentSessionId) {
@@ -383,18 +386,43 @@ export class OpenBoxCopilotKitEmitter {
       return null;
     }
 
-    return this.#evaluateWith(client, payload, emissionMeta);
+    return this.#evaluateWithLegacyClient(client, payload, emissionMeta);
   }
 
   async #evaluate(
     payload: Record<string, unknown>,
     emissionMeta: Pick<OpenBoxEmission, "activityId" | "eventType" | "workflowId">
   ): Promise<GovernanceVerdictResponse | null> {
-    return this.#evaluateWith(this.#client, payload, emissionMeta);
+    this.#notifyObserver(payload, emissionMeta);
+
+    try {
+      // The base client's `evaluate` takes a prepared `JsonValue` and
+      // resolves a base `EvaluationResult`. Payload assembly is still
+      // hand-built here (Phase 3 migrates it to the base gate/factories) —
+      // every field this SDK reads off the result (`verdict`, `reason`,
+      // `policyId`, `governanceEventId`, `approvalId`, ...) is named
+      // identically on both shapes, so this bridge is safe until Phase 3
+      // unifies the two types.
+      const result = await this.#client.evaluate(payload as unknown as JsonValue);
+      return result as unknown as GovernanceVerdictResponse | null;
+    } catch (err) {
+      this.#logger.warn?.({
+        err,
+        event_type: payload.event_type,
+        workflow_id: payload.workflow_id
+      });
+      return null;
+    }
   }
 
-  async #evaluateWith(
-    client: OpenBoxClient,
+  /**
+   * Multi-agent handoff emission still goes through the legacy adapter-owned
+   * client for CHILD credentials — Phase 2 does not migrate child-client
+   * construction (see `openbox-middleware.ts#buildChildClient`); Phase 5
+   * moves child construction to child-scoped base runtimes.
+   */
+  async #evaluateWithLegacyClient(
+    client: LegacyOpenBoxClient,
     payload: Record<string, unknown>,
     emissionMeta: Pick<OpenBoxEmission, "activityId" | "eventType" | "workflowId">
   ): Promise<GovernanceVerdictResponse | null> {

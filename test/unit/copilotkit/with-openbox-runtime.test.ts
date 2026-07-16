@@ -63,7 +63,7 @@ describe("withOpenBoxRuntime — tuple-return shape", () => {
 
     const attached = getOpenBoxRuntime<OpenBoxRuntimeController>(runtime);
     expect(attached).toBeDefined();
-    expect(attached?.client).toBeDefined();
+    expect(attached?.runtime.client).toBeDefined();
     expect(attached?.logger).toBeDefined();
 
     await shutdown();

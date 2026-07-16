@@ -5,6 +5,7 @@ import {
   type BaseEvent,
   type RunAgentInput
 } from "@ag-ui/client";
+import type { OnApiError } from "@openbox-ai/openbox-sdk-ts/config";
 import { Observable } from "rxjs";
 
 import { attachAuditEnvelope } from "../audit/audit-envelope.js";
@@ -133,7 +134,7 @@ export class OpenBoxMiddleware extends Middleware {
     this.#multiAgent = opts.multiAgent;
     this.#multiAgentEnabled = opts.multiAgent?.enabled === true;
     this.#parentAgentDid =
-      opts.multiAgent?.parentAgentDid ?? runtime.client.agentDid;
+      opts.multiAgent?.parentAgentDid ?? runtime.runtime.config.agentDid ?? undefined;
 
     // Fail fast: multi-agent mode needs a parent DID to populate
     // `from_agent_did` on the Handoff. Without it OpenBox rejects the marker.
@@ -876,16 +877,20 @@ export class OpenBoxMiddleware extends Middleware {
     }
 
     try {
-      const parent = this.#runtime.client;
+      // The base `OpenBoxClient` has no public props to read (RT-F6) — source
+      // the shared fields from the resolved base config instead. Base config
+      // has no retry concept, so `evaluateMaxRetries`/`evaluateRetryBaseDelayMs`
+      // are not translated here (Phase 2 does not carry these legacy fields
+      // into the runtime at all; full alias translation is Phase 6) and the
+      // legacy child client's own defaults apply.
+      const parentConfig = this.#runtime.runtime.config;
       const childClient = new OpenBoxClient({
         agentDid: childAgentDid,
         agentPrivateKey: childAgentPrivateKey,
         apiKey: childApiKey,
-        apiUrl: parent.apiUrl,
-        evaluateMaxRetries: parent.evaluateMaxRetries,
-        evaluateRetryBaseDelayMs: parent.evaluateRetryBaseDelayMs,
-        onApiError: parent.onApiError,
-        timeoutSeconds: parent.timeoutSeconds
+        apiUrl: parentConfig.apiUrl,
+        onApiError: toLegacyApiErrorPolicy(parentConfig.onApiError),
+        timeoutSeconds: parentConfig.timeoutSeconds
       });
       this.#childClientCache.set(childAgentDid, childClient);
       return childClient;
@@ -941,6 +946,16 @@ function extractUserText(message: unknown): unknown {
     }
   }
   return message;
+}
+
+/**
+ * The legacy child client only understands `fail_open`/`fail_closed`. The
+ * base config's `fail_closed_destructive` is unreachable through this SDK's
+ * own config input type (which never offers that value) — degrade it to the
+ * safer `fail_closed` rather than silently falling back to `fail_open`.
+ */
+function toLegacyApiErrorPolicy(policy: OnApiError): "fail_open" | "fail_closed" {
+  return policy === "fail_open" ? "fail_open" : "fail_closed";
 }
 
 function parseToolArgs(raw: string): unknown {

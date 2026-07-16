@@ -32,6 +32,13 @@ export interface WithOpenBoxRuntimeConfig extends OpenBoxConfigInput {
   defaults?: OpenBoxRuntimeDefaults;
   logger?: OpenBoxLogger;
   middlewareOptions?: OpenBoxMiddlewareOptions;
+  /**
+   * Perform a real `GET /api/v1/auth/validate` round-trip at setup time.
+   * Default `false` — `withOpenBoxRuntime` never performs a network call at
+   * construction unless this is explicitly enabled. Distinct from the base
+   * config's own `validate` flag (format/shape validation only, no network).
+   */
+  validateApiKeyAtStartup?: boolean;
 }
 
 export interface WithOpenBoxRuntimeResult {
@@ -71,7 +78,8 @@ export async function withOpenBoxRuntime(
     throw new TypeError(INSTANCE_FORM_MESSAGE);
   }
 
-  const { defaults, logger, middlewareOptions, ...openboxConfig } = config;
+  const { defaults, logger, middlewareOptions, validateApiKeyAtStartup, ...openboxConfig } =
+    config;
 
   const wrapped = await wrapCopilotRuntimeOptions(
     options as unknown as CopilotRuntimeOptionsLike,
@@ -79,7 +87,8 @@ export async function withOpenBoxRuntime(
     {
       ...(defaults !== undefined ? { defaults } : {}),
       ...(logger !== undefined ? { logger } : {}),
-      ...(middlewareOptions !== undefined ? { middlewareOptions } : {})
+      ...(middlewareOptions !== undefined ? { middlewareOptions } : {}),
+      ...(validateApiKeyAtStartup !== undefined ? { validateApiKeyAtStartup } : {})
     }
   );
 

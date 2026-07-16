@@ -4,10 +4,13 @@ import {
   type BaseEvent,
   type RunAgentInput
 } from "@ag-ui/client";
+import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 import { EMPTY, Observable } from "rxjs";
 import { vi, type Mock } from "vitest";
 
 import { OpenBoxClient } from "../../../src/client/openbox-client.js";
+import { RunContextStore } from "../../../src/copilotkit/internal/run-context-store.js";
+import { ServerToolOwnershipRegistry } from "../../../src/copilotkit/internal/server-tool-ownership.js";
 import type {
   OpenBoxLogger,
   OpenBoxRuntimeController
@@ -76,6 +79,28 @@ export interface BuiltController {
   pollApprovalMock: Mock;
 }
 
+/**
+ * Minimal stand-in for the base `OpenBoxRuntime`. Tests exercise the
+ * middleware/emitter with the SAME legacy adapter-owned mock `OpenBoxClient`
+ * they always have — only its shape is now nested under `.runtime.client` to
+ * match the real `OpenBoxRuntimeController`. `.config` carries just the
+ * fields `openbox-middleware.ts` reads off the resolved base config (parent
+ * DID fallback + legacy child-client construction); the stand-in is cast (not
+ * a real `OpenBoxRuntime`) because unit tests never need the base runtime's
+ * other behavior (`evaluateLifecycle`/`preflight`/`completed`/`.adapter`).
+ */
+function buildRuntimeStandIn(client: OpenBoxClient): OpenBoxRuntime {
+  return {
+    client,
+    config: {
+      agentDid: null,
+      apiUrl: "http://test.invalid",
+      onApiError: "fail_open",
+      timeoutSeconds: 1
+    }
+  } as unknown as OpenBoxRuntime;
+}
+
 export function buildController(
   options: BuildControllerOptions = {}
 ): BuiltController {
@@ -96,9 +121,11 @@ export function buildController(
 
   const logger: OpenBoxLogger & { warn: Mock } = { warn: vi.fn() };
   const controller: OpenBoxRuntimeController = {
-    client,
+    runtime: buildRuntimeStandIn(client),
+    runContext: new RunContextStore(),
     defaults: { agentId: "test-agent", workflowType: "copilotkit" },
-    logger
+    logger,
+    serverToolOwnership: new ServerToolOwnershipRegistry()
   };
 
   return { controller, evaluateMock, logger, pollApprovalMock };
