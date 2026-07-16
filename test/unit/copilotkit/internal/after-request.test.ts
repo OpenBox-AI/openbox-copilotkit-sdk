@@ -248,3 +248,84 @@ describe("openBoxAfterRequest", () => {
     ).resolves.toBeUndefined();
   });
 });
+
+describe("openBoxAfterRequest — output dedup (RT-F14)", () => {
+  it("does not emit assistant_message when the run already emitted agent_output via the AG-UI stream", async () => {
+    const { controller, evaluateMock } = buildController();
+    controller.runTerminalState.markOutputEmitted("run-dedup-1");
+    const runtime: Record<string, unknown> = {};
+    attachOpenBoxRuntime(runtime, controller);
+    const fn = openBoxAfterRequest(runtime);
+
+    await fn({
+      ...buildParams({
+        messages: [ASSISTANT_MESSAGE],
+        runId: "run-dedup-1",
+        threadId: "thread-dedup-1"
+      }),
+      runtime
+    });
+
+    expect(evaluateMock).not.toHaveBeenCalled();
+  });
+
+  it("does not emit assistant_message when the run ended suspended (interrupt outcome, not finished)", async () => {
+    const { controller, evaluateMock } = buildController();
+    controller.runTerminalState.markInterrupted("run-dedup-2");
+    const runtime: Record<string, unknown> = {};
+    attachOpenBoxRuntime(runtime, controller);
+    const fn = openBoxAfterRequest(runtime);
+
+    await fn({
+      ...buildParams({
+        messages: [ASSISTANT_MESSAGE],
+        runId: "run-dedup-2",
+        threadId: "thread-dedup-2"
+      }),
+      runtime
+    });
+
+    expect(evaluateMock).not.toHaveBeenCalled();
+  });
+
+  it("still emits the fallback when RunTerminalState has no entry for the run (stream produced no terminal output)", async () => {
+    const { controller, evaluateMock } = buildController();
+    const runtime: Record<string, unknown> = {};
+    attachOpenBoxRuntime(runtime, controller);
+    const fn = openBoxAfterRequest(runtime);
+
+    await fn({
+      ...buildParams({
+        messages: [ASSISTANT_MESSAGE],
+        runId: "run-dedup-3",
+        threadId: "thread-dedup-3"
+      }),
+      runtime
+    });
+
+    expect(evaluateMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears the RunTerminalState entry after reading it (last consumer owns cleanup — bounds memory)", async () => {
+    const { controller, evaluateMock } = buildController();
+    controller.runTerminalState.markOutputEmitted("run-dedup-4");
+    const runtime: Record<string, unknown> = {};
+    attachOpenBoxRuntime(runtime, controller);
+    const fn = openBoxAfterRequest(runtime);
+
+    await fn({
+      ...buildParams({
+        messages: [ASSISTANT_MESSAGE],
+        runId: "run-dedup-4",
+        threadId: "thread-dedup-4"
+      }),
+      runtime
+    });
+
+    expect(evaluateMock).not.toHaveBeenCalled();
+    expect(controller.runTerminalState.get("run-dedup-4")).toEqual({
+      interrupted: false,
+      outputEmitted: false
+    });
+  });
+});

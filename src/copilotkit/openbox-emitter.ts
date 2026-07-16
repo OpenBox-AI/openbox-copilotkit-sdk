@@ -10,6 +10,7 @@ import { WorkflowEventType } from "../types/workflow-event-type.js";
 import {
   buildActivityCompletedEnvelope,
   buildActivityStartedEnvelope,
+  buildInterruptSignalEnvelope,
   buildSignalReceivedEnvelope,
   buildWorkflowCompletedEnvelope,
   buildWorkflowFailedEnvelope,
@@ -20,6 +21,7 @@ import {
   serializeOrNull,
   type ActivityCompletedInput,
   type ActivityStartedInput,
+  type InterruptSignalInput,
   type SignalEmitInput,
   type WorkflowCompletedInput,
   type WorkflowFailedInput,
@@ -140,6 +142,29 @@ export class OpenBoxCopilotKitEmitter {
       payload: this.#redactAndBound(input.payload)
     };
     const { payload } = prepareLifecyclePayload(buildSignalReceivedEnvelope(boundedInput), {
+      privacy: this.#privacy
+    });
+
+    this.#enqueueTelemetry(payload, {
+      activityId: undefined,
+      eventType: WorkflowEventType.SIGNAL_RECEIVED,
+      workflowId: input.workflowId
+    }, input.runId, false);
+    return Promise.resolve(null);
+  }
+
+  /**
+   * `copilotkit_interrupt` signal (fixes B3) — fired ONCE per interrupted
+   * `RUN_FINISHED` in place of `WorkflowCompleted`. Pure telemetry, same
+   * shape as the other non-enforcing emit* methods: enqueue on the bounded,
+   * non-blocking queue (Phase 3, fixes B4) and return immediately.
+   * `response_schemas` is expected to already be redacted (`run-outcome.ts`
+   * does this at parse time) — this method does not redact again.
+   */
+  public emitInterruptSignal(
+    input: InterruptSignalInput
+  ): Promise<GovernanceVerdictResponse | null> {
+    const { payload } = prepareLifecyclePayload(buildInterruptSignalEnvelope(input), {
       privacy: this.#privacy
     });
 

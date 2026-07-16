@@ -2,7 +2,9 @@ import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 
 import type { SpanBuffer } from "../spans/span-buffer.js";
 
+import type { InterruptPersistencePort } from "./internal/interrupt-store.js";
 import type { RunContextStore } from "./internal/run-context-store.js";
+import type { RunTerminalStateRegistry } from "./internal/run-terminal-state.js";
 import type { ServerToolOwnershipRegistry } from "./internal/server-tool-ownership.js";
 import type { LifecycleTelemetryQueue, TelemetryQueueOptions } from "./lifecycle-telemetry.js";
 
@@ -41,7 +43,11 @@ export interface OpenBoxRuntimeDefaults {
  * request this controller serves, never per-middleware-instance.
  * `serverToolOwnership` is a run-scoped `(runId, toolCallId)` registry
  * the server-tool wrapper (Phase 5) claims to suppress a duplicate AG-UI
- * observation for the same call.
+ * observation for the same call. `interruptStore` is the MANDATORY
+ * injectable pending-interrupt persistence port (RT-F9/P2-10) — the
+ * in-memory default is documented as non-durable, never a process-global.
+ * `runTerminalState` is the per-run output-dedup/interrupted registry
+ * (RT-F14) shared by the AG-UI middleware and `internal/after-request.ts`.
  */
 export interface OpenBoxRuntimeController {
   runtime: OpenBoxRuntime;
@@ -50,6 +56,8 @@ export interface OpenBoxRuntimeController {
   defaults: OpenBoxRuntimeDefaults;
   logger: OpenBoxLogger;
   serverToolOwnership: ServerToolOwnershipRegistry;
+  interruptStore: InterruptPersistencePort;
+  runTerminalState: RunTerminalStateRegistry;
 }
 
 /**

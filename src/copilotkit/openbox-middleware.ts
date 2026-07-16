@@ -3,7 +3,8 @@ import {
   Middleware,
   type AbstractAgent,
   type BaseEvent,
-  type RunAgentInput
+  type RunAgentInput,
+  type RunFinishedEvent
 } from "@ag-ui/client";
 import type { OnApiError } from "@openbox-ai/openbox-sdk-ts/config";
 import { Observable } from "rxjs";
@@ -25,6 +26,7 @@ import {
   createGovernanceBlockedErrorEvent,
   type GovernanceBlockedErrorEvent
 } from "./governance-blocked-error.js";
+import { DEFAULT_INTERRUPT_TTL_MS, type PendingInterrupt } from "./internal/interrupt-store.js";
 import {
   AGENT_OUTPUT_SIGNAL_NAME,
   COPILOTKIT_TASK_QUEUE,
@@ -32,6 +34,12 @@ import {
   OpenBoxCopilotKitEmitter,
   USER_INPUT_SIGNAL_NAME
 } from "./openbox-emitter.js";
+import {
+  parseResumeEntries,
+  parseRunOutcome,
+  type ParsedInterrupt,
+  type ParsedResumeEntry
+} from "./run-outcome.js";
 import type {
   MultiAgentSessionContext,
   OpenBoxMiddlewareOptions,
@@ -44,6 +52,11 @@ import type {
 
 const TOOL_ORIGIN = "copilotkit-observed";
 const TOOL_CALL_RESULT_EVENT_TYPE = "TOOL_CALL_RESULT";
+// Fallback tool name for a persisted interrupt whose id has no corresponding
+// entry in this run's tool-call buffer (RT-F5 non-BuiltInAgent shape — the
+// interrupt's own `id` never matches a buffered `toolCallId` there). Cosmetic
+// only: it never affects RT-F5 correlation, which always keys on `id`.
+const UNKNOWN_INTERRUPT_TOOL_NAME = "unknown";
 
 /**
  * Extract `EventWithState` from `Middleware.runNextWithState` return type so
@@ -76,6 +89,13 @@ interface PerRunState {
   multiAgentSessionId: string | undefined;
   outputBuffers: Map<string, string>;
   outputText: string;
+  // The interrupted run's id, when THIS run is a resume (RT-F5) — read off
+  // `RunAgentInput.parentRunId` once at run start. `undefined` for a normal
+  // (non-resume) run.
+  parentRunId: string | undefined;
+  // Parsed once (at run start) from `RunAgentInput.forwardedProps.resume` —
+  // non-empty exactly when this run is resuming one or more prior interrupts.
+  resumeEntries: ParsedResumeEntry[];
   runId: string;
   startTime: number;
   toolCallBuffer: Map<string, ToolCallBufferEntry>;
@@ -166,6 +186,8 @@ export class OpenBoxMiddleware extends Middleware {
         ),
         outputBuffers: new Map(),
         outputText: "",
+        parentRunId: input.parentRunId,
+        resumeEntries: parseResumeEntries(input),
         runId: input.runId,
         startTime: Date.now(),
         toolCallBuffer: new Map(),
@@ -435,37 +457,14 @@ export class OpenBoxMiddleware extends Middleware {
       }
 
       case EventType.RUN_FINISHED: {
-        const endTime = Date.now();
-        const blockResult = await this.#flushPendingToolCalls({
+        return this.#handleRunFinished({
           agentId,
+          endTime: Date.now(),
+          event: event as RunFinishedEvent,
           goal,
           metadata,
           state
         });
-        if (blockResult) {
-          return blockResult;
-        }
-        await this.#emitter.emitSignalReceived({
-          goal,
-          metadata,
-          multiAgentSessionId: state.multiAgentSessionId,
-          payload: state.outputText,
-          runId: state.runId,
-          signalName: AGENT_OUTPUT_SIGNAL_NAME,
-          workflowId: state.workflowId
-        });
-        await this.#emitter.emitWorkflowCompleted({
-          agentOutput: state.outputText,
-          durationMs: Math.max(0, endTime - state.startTime),
-          endTime,
-          goal,
-          metadata,
-          multiAgentSessionId: state.multiAgentSessionId,
-          runId: state.runId,
-          startTime: state.startTime,
-          workflowId: state.workflowId
-        });
-        return undefined;
       }
 
       case EventType.RUN_ERROR: {
@@ -473,17 +472,30 @@ export class OpenBoxMiddleware extends Middleware {
           code?: string;
           message?: string;
         };
+        const error = {
+          code: errorEvent.code,
+          message: errorEvent.message ?? "Run failed"
+        };
+        const blockResult = await this.#flushPendingToolCalls({
+          agentId,
+          error,
+          goal,
+          metadata,
+          state,
+          status: "failed"
+        });
+        if (blockResult) {
+          return blockResult;
+        }
         await this.#emitter.emitWorkflowFailed({
-          error: {
-            code: errorEvent.code,
-            message: errorEvent.message ?? "Run failed"
-          },
+          error,
           goal,
           metadata,
           multiAgentSessionId: state.multiAgentSessionId,
           runId: state.runId,
           workflowId: state.workflowId
         });
+        this.#clearRunOnTerminal(state);
         return undefined;
       }
 
@@ -492,16 +504,254 @@ export class OpenBoxMiddleware extends Middleware {
     }
   }
 
-  async #flushPendingToolCalls({
+  /**
+   * `RUN_FINISHED` dispatcher (fixes B3). Outcome is parsed BEFORE any
+   * flush. Order: resume correlation first — it closes out an ORIGINAL
+   * (interrupted) run's dangling activity and is independent of THIS run's
+   * own outcome — then interrupt (pending + one signal, no completion) or
+   * success (unchanged pre-Phase-4 flush + signal + `WorkflowCompleted`).
+   * Every branch ends in `#clearRunOnTerminal` (RT-F14).
+   */
+  async #handleRunFinished({
     agentId,
+    endTime,
+    event,
     goal,
     metadata,
     state
   }: {
     agentId?: string | undefined;
+    endTime: number;
+    event: RunFinishedEvent;
     goal?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
     state: PerRunState;
+  }): Promise<GovernanceBlockedErrorEvent | undefined> {
+    if (state.resumeEntries.length > 0) {
+      const unresolvable = await this.#connectResumeEntries({ endTime, goal, metadata, state });
+      if (unresolvable) {
+        // RT-F9: a resume that cannot be correlated is a typed failure —
+        // never a fabricated completion. Stop here; do not also evaluate
+        // this run's own outcome.
+        this.#clearRunOnTerminal(state);
+        return undefined;
+      }
+    }
+
+    const outcome = parseRunOutcome(event, this.#redactPaths);
+
+    if (outcome.kind === "interrupt") {
+      await this.#handleInterruptOutcome({ interrupts: outcome.interrupts, state });
+      // Keep this run's just-saved pending interrupts — a later resume run
+      // reads them back via `interruptStore.take` (RT-F9).
+      this.#clearRunOnTerminal(state, { keepInterrupts: true });
+      return undefined;
+    }
+
+    // Success (outcome undefined or {type:"success"}) — unchanged
+    // pre-Phase-4 behavior: flush any frontend-only tool call (no
+    // TOOL_CALL_RESULT companion event exists for those), then signal +
+    // complete exactly once.
+    const blockResult = await this.#flushPendingToolCalls({
+      agentId,
+      goal,
+      metadata,
+      state,
+      status: "completed"
+    });
+    if (blockResult) {
+      return blockResult;
+    }
+    await this.#emitter.emitSignalReceived({
+      goal,
+      metadata,
+      multiAgentSessionId: state.multiAgentSessionId,
+      payload: state.outputText,
+      runId: state.runId,
+      signalName: AGENT_OUTPUT_SIGNAL_NAME,
+      workflowId: state.workflowId
+    });
+    this.#runtime.runTerminalState.markOutputEmitted(state.runId);
+    await this.#emitter.emitWorkflowCompleted({
+      agentOutput: state.outputText,
+      durationMs: Math.max(0, endTime - state.startTime),
+      endTime,
+      goal,
+      metadata,
+      multiAgentSessionId: state.multiAgentSessionId,
+      runId: state.runId,
+      startTime: state.startTime,
+      workflowId: state.workflowId
+    });
+    this.#clearRunOnTerminal(state);
+    return undefined;
+  }
+
+  /**
+   * Interrupt outcome (fixes B3): persist one `PendingInterrupt` snapshot
+   * per interrupt — keyed on the interrupt's own `id`, NEVER `toolCallId`
+   * (RT-F5) — emit ONE `copilotkit_interrupt` signal, and mark the run
+   * interrupted. Deliberately does NOT touch `state.toolCallBuffer`: every
+   * buffered (unresolved) tool call stays PENDING because the run is
+   * suspended, not finished — no `ActivityCompleted`, no `WorkflowCompleted`.
+   */
+  async #handleInterruptOutcome({
+    interrupts,
+    state
+  }: {
+    interrupts: readonly ParsedInterrupt[];
+    state: PerRunState;
+  }): Promise<void> {
+    const pending: PendingInterrupt[] = interrupts.map(interrupt => {
+      // Best-effort cosmetic lookup only (toolName/args/startTime for the
+      // eventual resume completion) — NEVER used for correlation, which
+      // always keys on `interrupt.id` alone (RT-F5). Absent on the
+      // non-BuiltInAgent shape, where the interrupt carries no `toolCallId`
+      // and its `id` never matches a buffered `toolCallId` either.
+      const buffered = state.toolCallBuffer.get(interrupt.toolCallId ?? interrupt.id);
+      return {
+        activityId: interrupt.id,
+        ...(buffered?.activityArgs !== undefined
+          ? { activityArgs: buffered.activityArgs }
+          : {}),
+        ...(state.multiAgentSessionId !== undefined
+          ? { multiAgentSessionId: state.multiAgentSessionId }
+          : {}),
+        ...(interrupt.message !== undefined ? { message: interrupt.message } : {}),
+        reason: interrupt.reason,
+        ...(buffered !== undefined ? { startTime: buffered.startTime } : {}),
+        toolName: buffered?.toolName ?? UNKNOWN_INTERRUPT_TOOL_NAME,
+        workflowId: state.workflowId
+      };
+    });
+
+    this.#runtime.interruptStore.save(state.runId, pending, DEFAULT_INTERRUPT_TTL_MS);
+    this.#runtime.runTerminalState.markInterrupted(state.runId);
+
+    await this.#emitter.emitInterruptSignal({
+      interruptIds: interrupts.map(i => i.id),
+      messages: interrupts.map(i => i.message),
+      multiAgentSessionId: state.multiAgentSessionId,
+      reasons: interrupts.map(i => i.reason),
+      responseSchemas: interrupts.map(i => i.responseSchema),
+      runId: state.runId,
+      workflowId: state.workflowId
+    });
+  }
+
+  /**
+   * Correlate every resume entry against the interrupt-persistence port
+   * (RT-F5 — keyed on `interruptId`, i.e. the ORIGINAL interrupt's own
+   * `id`), looked up under the ORIGINAL (interrupted) run's id —
+   * `parentRunId` when present, else this run's own id. On a match: emit a
+   * correcting `ActivityCompleted` attributed to the ORIGINAL run/workflow
+   * ids (closing out the activity left dangling when it interrupted), with
+   * `status` mapped from `resume.status` (`resolved` -> `completed`,
+   * `cancelled` -> `aborted`) and `resume.payload` as the output. On a miss
+   * (never interrupted, already resumed, or TTL-expired): emit a typed
+   * `workflowFailed` and return `true` — RT-F9 forbids fabricating a
+   * completion. Returns `true` on the FIRST unresolvable entry (stops the
+   * loop — a run's own outcome is never evaluated after a resume failure).
+   */
+  async #connectResumeEntries({
+    endTime,
+    goal,
+    metadata,
+    state
+  }: {
+    endTime: number;
+    goal?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+    state: PerRunState;
+  }): Promise<boolean> {
+    const originalRunId = state.parentRunId ?? state.runId;
+
+    for (const entry of state.resumeEntries) {
+      const pending = this.#runtime.interruptStore.take(originalRunId, entry.interruptId);
+      if (!pending) {
+        await this.#emitter.emitWorkflowFailed({
+          error: {
+            message: `Resume references an unknown or expired interrupt id: ${entry.interruptId}`,
+            name: "OpenBoxInterruptResumeCorrelationError"
+          },
+          goal,
+          metadata,
+          multiAgentSessionId: state.multiAgentSessionId,
+          runId: state.runId,
+          workflowId: state.workflowId
+        });
+        return true;
+      }
+
+      await this.#emitter.emitActivityCompleted({
+        ...(pending.activityArgs !== undefined ? { activityArgs: pending.activityArgs } : {}),
+        activityId: pending.activityId,
+        ...(entry.payload !== undefined ? { activityOutput: entry.payload } : {}),
+        ...(pending.startTime !== undefined
+          ? {
+              durationMs: Math.max(0, endTime - pending.startTime),
+              startTime: pending.startTime
+            }
+          : {}),
+        endTime,
+        goal,
+        metadata,
+        ...(pending.multiAgentSessionId !== undefined
+          ? { multiAgentSessionId: pending.multiAgentSessionId }
+          : {}),
+        runId: originalRunId,
+        status: entry.status === "resolved" ? "completed" : "aborted",
+        toolName: pending.toolName,
+        workflowId: pending.workflowId
+      });
+    }
+
+    return false;
+  }
+
+  /**
+   * RT-F14 terminal cleanup — called on every RUN_FINISHED/RUN_ERROR path.
+   * `contextStore.clearHalt` bounds the BASE per-run HALT set: the base has
+   * no stop-signal FIFO, so a finished run's HALT entry would otherwise
+   * live until process shutdown; this consumer owns clearing it once the
+   * run's stream is truly over, regardless of outcome kind.
+   * `interruptStore.clearRun` is SKIPPED when `keepInterrupts` is set — an
+   * interrupt outcome persists fresh entries in this SAME call, and a later
+   * resume run must still be able to `take()` them back.
+   */
+  #clearRunOnTerminal(
+    state: PerRunState,
+    opts: { keepInterrupts?: boolean } = {}
+  ): void {
+    this.#runtime.runtime.contextStore.clearHalt(state.workflowId, state.runId);
+    if (!opts.keepInterrupts) {
+      this.#runtime.interruptStore.clearRun(state.runId);
+    }
+  }
+
+  /**
+   * Flush every still-buffered (unresolved) tool call with the given
+   * terminal `status`. Used by BOTH the success path (`status: "completed"`
+   * — frontend tools never produce a `TOOL_CALL_RESULT`, so RUN_FINISHED is
+   * their only completion point) and the RUN_ERROR/source-error paths
+   * (`status: "failed"`, carrying the run's own `error`). NEVER called for
+   * an interrupt outcome — an interrupted run's buffered calls must stay
+   * PENDING (fixes B3; see `#handleInterruptOutcome`).
+   */
+  async #flushPendingToolCalls({
+    agentId,
+    error,
+    goal,
+    metadata,
+    state,
+    status
+  }: {
+    agentId?: string | undefined;
+    error?: Record<string, unknown> | undefined;
+    goal?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+    state: PerRunState;
+    status: "completed" | "failed" | "aborted";
   }): Promise<GovernanceBlockedErrorEvent | undefined> {
     for (const [activityId, entry] of state.toolCallBuffer) {
       entry.activityArgs ??= parseToolArgs(entry.args);
@@ -521,10 +771,11 @@ export class OpenBoxMiddleware extends Middleware {
         activityId,
         agentId,
         entry,
+        ...(error !== undefined ? { error } : {}),
         goal,
         metadata,
         state,
-        status: "completed"
+        status
       });
       state.toolCallBuffer.delete(activityId);
     }
@@ -585,6 +836,7 @@ export class OpenBoxMiddleware extends Middleware {
     activityOutput,
     agentId,
     entry,
+    error,
     goal,
     metadata,
     state,
@@ -594,6 +846,7 @@ export class OpenBoxMiddleware extends Middleware {
     activityOutput?: unknown;
     agentId?: string | undefined;
     entry: ToolCallBufferEntry;
+    error?: Record<string, unknown> | undefined;
     goal?: string | undefined;
     metadata?: Record<string, unknown> | undefined;
     state: PerRunState;
@@ -617,6 +870,7 @@ export class OpenBoxMiddleware extends Middleware {
       ...(activityOutput !== undefined ? { activityOutput } : {}),
       durationMs: Math.max(0, endTime - entry.startTime),
       endTime,
+      ...(error !== undefined ? { error } : {}),
       goal,
       metadata,
       multiAgentSessionId: state.multiAgentSessionId,
@@ -716,17 +970,33 @@ export class OpenBoxMiddleware extends Middleware {
     err: unknown
   ): Promise<void> {
     const context = getOpenBoxExecutionContext();
+    const error = {
+      message: err instanceof Error ? err.message : String(err),
+      name: err instanceof Error ? err.name : "Error"
+    };
+    // Flush unresolved activities as failed before the workflow failure
+    // (mirrors the RUN_ERROR path). A governance block surfaced by this
+    // flush has nowhere meaningful to go here — the source stream is
+    // already erroring and `subscriber.error(err)` follows unconditionally
+    // in the caller — so its return value is intentionally not applied to
+    // a client-visible event; Core still sees a failed completion per
+    // dangling activity.
+    await this.#flushPendingToolCalls({
+      error,
+      goal: context?.goal,
+      metadata: context?.metadata,
+      state,
+      status: "failed"
+    });
     await this.#emitter.emitWorkflowFailed({
-      error: {
-        message: err instanceof Error ? err.message : String(err),
-        name: err instanceof Error ? err.name : "Error"
-      },
+      error,
       goal: context?.goal,
       metadata: context?.metadata,
       multiAgentSessionId: state.multiAgentSessionId,
       runId: state.runId,
       workflowId: state.workflowId
     });
+    this.#clearRunOnTerminal(state);
   }
 
   #isFrontend(call: { name: string }): boolean {

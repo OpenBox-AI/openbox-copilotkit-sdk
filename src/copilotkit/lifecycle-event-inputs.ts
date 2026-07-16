@@ -84,3 +84,21 @@ export interface WorkflowFailedInput extends MultiAgentEventFields {
   runId: string;
   workflowId: string;
 }
+
+/**
+ * `copilotkit_interrupt` signal input (fixes B3). Every array is parallel
+ * (same length/order as the parsed `outcome.interrupts`) — `interruptIds`
+ * are the AG-UI interrupt `id`s (RT-F5, never `toolCallId`); `responseSchemas`
+ * are already redacted/bounded by `run-outcome.ts` before this input is built.
+ */
+export interface InterruptSignalInput {
+  goal?: string | undefined;
+  interruptIds: readonly string[];
+  messages: ReadonlyArray<string | undefined>;
+  metadata?: Record<string, unknown> | undefined;
+  multiAgentSessionId?: string | undefined;
+  reasons: readonly string[];
+  responseSchemas: readonly unknown[];
+  runId: string;
+  workflowId: string;
+}

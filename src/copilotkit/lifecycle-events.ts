@@ -11,6 +11,7 @@ import {
 import type {
   ActivityCompletedInput,
   ActivityStartedInput,
+  InterruptSignalInput,
   SignalEmitInput,
   WorkflowCompletedInput,
   WorkflowFailedInput,
@@ -49,6 +50,8 @@ import {
 export const COPILOTKIT_WORKFLOW_TYPE = "copilotkit";
 export const COPILOTKIT_TASK_QUEUE = "copilotkit";
 export const COPILOTKIT_EVENT_SOURCE = "copilotkit-middleware";
+/** Fires once when `RUN_FINISHED.outcome.type === "interrupt"` (fixes B3). */
+export const COPILOTKIT_INTERRUPT_SIGNAL_NAME = "copilotkit_interrupt";
 
 /** `WorkflowStarted`: ids/type/queue/multi-agent are base-native; the rest rides in `extra`. */
 export function buildWorkflowStartedEnvelope(
@@ -87,6 +90,37 @@ export function buildSignalReceivedEnvelope(input: SignalEmitInput): EventEnvelo
         input.payload,
         Boolean(input.multiAgentSessionId)
       ),
+      ...(input.goal ? { goal: input.goal } : {}),
+      ...metadataExtra(input.metadata)
+    }
+  });
+}
+
+/**
+ * `copilotkit_interrupt` signal (fixes B3): fired once per interrupted
+ * `RUN_FINISHED` instead of `WorkflowCompleted`. Unlike the generic
+ * `SignalReceived` builder above (whose payload always nests under
+ * `signal_args`), this signal has a well-defined, structured shape — every
+ * array rides as its OWN named `extra` key, matching how `ActivityStarted`/
+ * `WorkflowStarted` expose their own typed extras rather than a generic
+ * wrapper. `responseSchemas` is expected to already be redacted/bounded
+ * (`run-outcome.ts` does this at parse time) — this builder does not
+ * redact again, it only guarantees JSON-safety (`undefined` -> `null`).
+ */
+export function buildInterruptSignalEnvelope(input: InterruptSignalInput): EventEnvelope {
+  return signalReceived({
+    workflowId: input.workflowId,
+    runId: input.runId,
+    workflowType: COPILOTKIT_WORKFLOW_TYPE,
+    taskQueue: COPILOTKIT_TASK_QUEUE,
+    ...multiAgentSessionIdOption(input.multiAgentSessionId),
+    signalName: COPILOTKIT_INTERRUPT_SIGNAL_NAME,
+    extra: {
+      source: COPILOTKIT_EVENT_SOURCE,
+      interrupt_ids: [...input.interruptIds],
+      reasons: [...input.reasons],
+      messages: input.messages.map(serializeOrNull),
+      response_schemas: input.responseSchemas.map(serializeOrNull),
       ...(input.goal ? { goal: input.goal } : {}),
       ...metadataExtra(input.metadata)
     }
@@ -201,6 +235,7 @@ export function buildWorkflowFailedEnvelope(input: WorkflowFailedInput): EventEn
 export type {
   ActivityCompletedInput,
   ActivityStartedInput,
+  InterruptSignalInput,
   MultiAgentEventFields,
   SignalEmitInput,
   WorkflowCompletedInput,

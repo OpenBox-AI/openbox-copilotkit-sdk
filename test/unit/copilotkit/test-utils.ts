@@ -5,12 +5,15 @@ import {
   type RunAgentInput
 } from "@ag-ui/client";
 import type { OpenBoxClient as BaseOpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+import { ContextStore } from "@openbox-ai/openbox-sdk-ts/context";
 import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 import { EMPTY, Observable } from "rxjs";
 import { vi, type Mock } from "vitest";
 
 import { OpenBoxClient } from "../../../src/client/openbox-client.js";
+import { InMemoryInterruptStore } from "../../../src/copilotkit/internal/interrupt-store.js";
 import { RunContextStore } from "../../../src/copilotkit/internal/run-context-store.js";
+import { RunTerminalStateRegistry } from "../../../src/copilotkit/internal/run-terminal-state.js";
 import { ServerToolOwnershipRegistry } from "../../../src/copilotkit/internal/server-tool-ownership.js";
 import { LifecycleTelemetryQueue } from "../../../src/copilotkit/lifecycle-telemetry.js";
 import type {
@@ -90,6 +93,13 @@ export interface BuiltController {
  * DID fallback + legacy child-client construction); the stand-in is cast (not
  * a real `OpenBoxRuntime`) because unit tests never need the base runtime's
  * other behavior (`evaluateLifecycle`/`preflight`/`completed`/`.adapter`).
+ *
+ * `contextStore` is a REAL base `ContextStore` (not a further mock/cast) —
+ * `openbox-middleware.ts`'s RUN_FINISHED/RUN_ERROR terminal cleanup
+ * (RT-F14) calls `controller.runtime.contextStore.clearHalt(...)`
+ * unconditionally, so every test that drives a terminal event through the
+ * middleware needs a working `contextStore`, not just tests that assert on
+ * halt behavior directly.
  */
 function buildRuntimeStandIn(client: OpenBoxClient): OpenBoxRuntime {
   return {
@@ -99,7 +109,8 @@ function buildRuntimeStandIn(client: OpenBoxClient): OpenBoxRuntime {
       apiUrl: "http://test.invalid",
       onApiError: "fail_open",
       timeoutSeconds: 1
-    }
+    },
+    contextStore: new ContextStore()
   } as unknown as OpenBoxRuntime;
 }
 
@@ -138,7 +149,9 @@ export function buildController(
     telemetryQueue,
     defaults: { agentId: "test-agent", workflowType: "copilotkit" },
     logger,
-    serverToolOwnership: new ServerToolOwnershipRegistry()
+    serverToolOwnership: new ServerToolOwnershipRegistry(),
+    interruptStore: new InMemoryInterruptStore(),
+    runTerminalState: new RunTerminalStateRegistry()
   };
 
   return { controller, evaluateMock, logger, pollApprovalMock };

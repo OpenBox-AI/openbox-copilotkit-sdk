@@ -20,6 +20,8 @@ import {
   type BeforeRequestMiddlewareParametersLike,
   type OpenBoxBeforeRequestOptions
 } from "./before-request.js";
+import { InMemoryInterruptStore, type InterruptPersistencePort } from "./interrupt-store.js";
+import { RunTerminalStateRegistry } from "./run-terminal-state.js";
 import { ServerToolOwnershipRegistry } from "./server-tool-ownership.js";
 import { wrapAgentInProxy } from "./wrap-agent-in-proxy.js";
 
@@ -78,6 +80,13 @@ export interface WrapCopilotRuntimeOptionsExtras {
   afterRequest?: OpenBoxAfterRequestOptions | undefined;
   /** Options passed through to `openBoxBeforeRequest` per request. */
   beforeRequest?: OpenBoxBeforeRequestOptions | undefined;
+  /**
+   * Injectable pending-interrupt persistence port (RT-F9/P2-10). Defaults to
+   * an in-memory, non-durable `InMemoryInterruptStore` — inject a custom
+   * port (e.g. Redis/Postgres-backed) for durability across process
+   * restarts.
+   */
+  interruptStore?: InterruptPersistencePort | undefined;
   /**
    * Perform a real `GET /api/v1/auth/validate` round-trip at setup time.
    * Default `false` — construction never performs a network call unless this
@@ -172,7 +181,9 @@ export async function wrapCopilotRuntimeOptions<
     telemetryQueue,
     defaults: extras.defaults ?? {},
     logger,
-    serverToolOwnership: new ServerToolOwnershipRegistry()
+    serverToolOwnership: new ServerToolOwnershipRegistry(),
+    interruptStore: extras.interruptStore ?? new InMemoryInterruptStore(),
+    runTerminalState: new RunTerminalStateRegistry()
   };
 
   const markerSymbol = Symbol("openbox.copilotkit.wrap");

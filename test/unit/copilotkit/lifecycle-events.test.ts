@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildActivityCompletedEnvelope,
   buildActivityStartedEnvelope,
+  buildInterruptSignalEnvelope,
   buildSignalReceivedEnvelope,
   buildWorkflowCompletedEnvelope,
   buildWorkflowFailedEnvelope,
@@ -90,6 +91,57 @@ describe("lifecycle-events builders — SignalReceived", () => {
     });
 
     expect(envelope.toPayloadDict().signal_args).toEqual({ value: null });
+  });
+});
+
+describe("lifecycle-events builders — copilotkit_interrupt (fixes B3)", () => {
+  it("carries every interrupt array as its own named extra field (not nested under signal_args)", () => {
+    const envelope = buildInterruptSignalEnvelope({
+      interruptIds: ["call-approve-1"],
+      messages: ["Approve deleteAccount for u1?"],
+      reasons: ["approval_required"],
+      responseSchemas: [{ type: "object" }],
+      runId: "run-1",
+      workflowId: "thread-1"
+    });
+
+    const payload = envelope.toPayloadDict();
+    expect(payload.signal_name).toBe("copilotkit_interrupt");
+    expect(payload.interrupt_ids).toEqual(["call-approve-1"]);
+    expect(payload.reasons).toEqual(["approval_required"]);
+    expect(payload.messages).toEqual(["Approve deleteAccount for u1?"]);
+    expect(payload.response_schemas).toEqual([{ type: "object" }]);
+    expect(payload).not.toHaveProperty("signal_args");
+  });
+
+  it("supports multiple parallel interrupts and null-safes a missing message/schema", () => {
+    const envelope = buildInterruptSignalEnvelope({
+      interruptIds: ["int-1", "int-2"],
+      messages: [undefined, "second reason's message"],
+      reasons: ["approval_required", "manual_review"],
+      responseSchemas: [undefined, { type: "string" }],
+      runId: "run-1",
+      workflowId: "thread-1"
+    });
+
+    const payload = envelope.toPayloadDict();
+    expect(payload.interrupt_ids).toEqual(["int-1", "int-2"]);
+    expect(payload.messages).toEqual([null, "second reason's message"]);
+    expect(payload.response_schemas).toEqual([null, { type: "string" }]);
+  });
+
+  it("array-wraps under multiAgentSessionId like the other builders (base-native field)", () => {
+    const envelope = buildInterruptSignalEnvelope({
+      interruptIds: ["int-1"],
+      messages: [undefined],
+      multiAgentSessionId: "mas:run-1",
+      reasons: ["approval_required"],
+      responseSchemas: [undefined],
+      runId: "run-1",
+      workflowId: "thread-1"
+    });
+
+    expect(envelope.toPayloadDict().multi_agent_session_id).toBe("mas:run-1");
   });
 });
 
