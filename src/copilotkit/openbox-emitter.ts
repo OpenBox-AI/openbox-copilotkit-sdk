@@ -1,84 +1,40 @@
-import type { JsonValue } from "@openbox-ai/openbox-sdk-ts";
+import { prepareLifecyclePayload, type JsonValue } from "@openbox-ai/openbox-sdk-ts";
 import type { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+import type { PrivacyConfig } from "@openbox-ai/openbox-sdk-ts/config";
 
 import type { OpenBoxClient as LegacyOpenBoxClient } from "../client/openbox-client.js";
 import type { SpanData } from "../spans/index.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { WorkflowEventType } from "../types/workflow-event-type.js";
 
+import {
+  buildActivityCompletedEnvelope,
+  buildActivityStartedEnvelope,
+  buildSignalReceivedEnvelope,
+  buildWorkflowCompletedEnvelope,
+  buildWorkflowFailedEnvelope,
+  buildWorkflowStartedEnvelope,
+  COPILOTKIT_EVENT_SOURCE,
+  COPILOTKIT_TASK_QUEUE,
+  COPILOTKIT_WORKFLOW_TYPE,
+  serializeOrNull,
+  type ActivityCompletedInput,
+  type ActivityStartedInput,
+  type SignalEmitInput,
+  type WorkflowCompletedInput,
+  type WorkflowFailedInput,
+  type WorkflowStartedInput
+} from "./lifecycle-events.js";
 import type {
   OpenBoxEmission,
   OpenBoxMiddlewareOptions,
   OpenBoxRuntimeController
 } from "./types.js";
 
-export const COPILOTKIT_WORKFLOW_TYPE = "copilotkit";
-export const COPILOTKIT_TASK_QUEUE = "copilotkit";
-export const COPILOTKIT_EVENT_SOURCE = "copilotkit-middleware";
+export { COPILOTKIT_TASK_QUEUE, COPILOTKIT_WORKFLOW_TYPE };
 
 export const USER_INPUT_SIGNAL_NAME = "user_input";
 export const AGENT_OUTPUT_SIGNAL_NAME = "agent_output";
-
-/**
- * Optional OpenBox multi-agent fields, mixed into emitter inputs. Both are
- * omitted from the wire payload when unset, so single-agent runs keep their
- * normal payload shape.
- */
-export interface MultiAgentEventFields {
-  multiAgentSessionId?: string | undefined;
-  parentWorkflowId?: string | undefined;
-}
-
-export interface WorkflowStartedInput extends MultiAgentEventFields {
-  agentId?: string | undefined;
-  goal?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  runId: string;
-  threadId: string;
-  userInput?: unknown;
-  workflowId: string;
-}
-
-export interface SignalEmitInput {
-  goal?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  multiAgentSessionId?: string | undefined;
-  payload: unknown;
-  runId: string;
-  signalName: string;
-  workflowId: string;
-}
-
-export interface ActivityStartedInput {
-  activityArgs?: unknown;
-  activityId: string;
-  agentId?: string | undefined;
-  frontend: boolean;
-  goal?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  multiAgentSessionId?: string | undefined;
-  runId: string;
-  toolName: string;
-  toolOrigin: string;
-  workflowId: string;
-}
-
-export interface ActivityCompletedInput {
-  activityArgs?: unknown;
-  activityId: string;
-  activityOutput?: unknown;
-  durationMs?: number | undefined;
-  endTime?: number | undefined;
-  error?: Record<string, unknown> | undefined;
-  goal?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  multiAgentSessionId?: string | undefined;
-  runId: string;
-  startTime?: number | undefined;
-  status: "completed" | "failed" | "aborted";
-  toolName: string;
-  workflowId: string;
-}
 
 /**
  * Carrier for a synthesized `function_call` span. It is emitted as a separate
@@ -99,25 +55,6 @@ export interface ActivityCompletedHookInput {
   workflowId: string;
 }
 
-export interface WorkflowCompletedInput extends MultiAgentEventFields {
-  agentOutput?: unknown;
-  durationMs?: number | undefined;
-  endTime?: number | undefined;
-  goal?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  runId: string;
-  startTime?: number | undefined;
-  workflowId: string;
-}
-
-export interface WorkflowFailedInput extends MultiAgentEventFields {
-  error: Record<string, unknown>;
-  goal?: string | undefined;
-  metadata?: Record<string, unknown> | undefined;
-  runId: string;
-  workflowId: string;
-}
-
 /**
  * Input for `emitHandoff`. The marker describes the parent workflow and is
  * sent with the child agent credentials when parent-side handoff emission is
@@ -134,14 +71,22 @@ export interface HandoffEmitInput {
 }
 
 /**
- * Wraps `client.evaluate` for CopilotKit-observed AG-UI events. Emitter
- * failures are logged and swallowed so telemetry cannot break the user stream.
- * Verdict objects are returned to callers that enforce approvals.
+ * Wraps `client.evaluate` for CopilotKit-observed AG-UI events. The six
+ * lifecycle/signal methods below build a base `EventEnvelope` via
+ * `lifecycle-events.ts`, run it through the base strict gate
+ * (`prepareLifecyclePayload`), then hand the exact prepared wire payload to
+ * `onEvent` and `client.evaluate` — no hand-built snake_case object remains
+ * for those six. `emitActivityCompletedHook` (hook-span) and `emitHandoff`
+ * still hand-assemble their payload via `withBaseEnvelope`/`toWireSpan`
+ * (migration deferred — see each method's own note). Emitter failures are
+ * logged and swallowed so telemetry cannot break the user stream. Verdict
+ * objects are returned to callers that enforce approvals.
  */
 export class OpenBoxCopilotKitEmitter {
   readonly #client: OpenBoxClient;
   readonly #logger: OpenBoxRuntimeController["logger"];
   readonly #onEvent: OpenBoxMiddlewareOptions["onEvent"];
+  readonly #privacy: PrivacyConfig;
 
   public constructor(
     controller: OpenBoxRuntimeController,
@@ -150,22 +95,14 @@ export class OpenBoxCopilotKitEmitter {
     this.#client = controller.runtime.client;
     this.#logger = controller.logger;
     this.#onEvent = onEvent;
+    this.#privacy = controller.runtime.config.privacy;
   }
 
   public async emitWorkflowStarted(
     input: WorkflowStartedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const payload = withBaseEnvelope({
-      event_type: WorkflowEventType.WORKFLOW_STARTED,
-      ...(input.goal ? { goal: input.goal } : {}),
-      ...(input.agentId ? { agent_id: input.agentId } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-      ...multiAgentFields(input),
-      run_id: input.runId,
-      thread_id: input.threadId,
-      workflow_id: input.workflowId,
-      workflow_input: serializeWorkflowInput(input.userInput),
-      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    const { payload } = prepareLifecyclePayload(buildWorkflowStartedEnvelope(input), {
+      privacy: this.#privacy
     });
 
     return this.#evaluate(payload, {
@@ -178,19 +115,8 @@ export class OpenBoxCopilotKitEmitter {
   public async emitSignalReceived(
     input: SignalEmitInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const payload = withBaseEnvelope({
-      event_type: WorkflowEventType.SIGNAL_RECEIVED,
-      ...(input.goal ? { goal: input.goal } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-      ...multiAgentFields(input),
-      run_id: input.runId,
-      signal_args: serializeSignalArgs(
-        input.payload,
-        Boolean(input.multiAgentSessionId)
-      ),
-      signal_name: input.signalName,
-      workflow_id: input.workflowId,
-      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    const { payload } = prepareLifecyclePayload(buildSignalReceivedEnvelope(input), {
+      privacy: this.#privacy
     });
 
     return this.#evaluate(payload, {
@@ -203,20 +129,8 @@ export class OpenBoxCopilotKitEmitter {
   public async emitActivityStarted(
     input: ActivityStartedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const payload = withBaseEnvelope({
-      activity_id: input.activityId,
-      activity_input: serializeActivityInput(input.activityArgs),
-      activity_type: input.toolName,
-      ...(input.agentId ? { agent_id: input.agentId } : {}),
-      event_type: WorkflowEventType.ACTIVITY_STARTED,
-      frontend: input.frontend,
-      ...(input.goal ? { goal: input.goal } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-      ...multiAgentFields(input),
-      run_id: input.runId,
-      tool_origin: input.toolOrigin,
-      workflow_id: input.workflowId,
-      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    const { payload } = prepareLifecyclePayload(buildActivityStartedEnvelope(input), {
+      privacy: this.#privacy
     });
 
     return this.#evaluate(payload, {
@@ -229,27 +143,8 @@ export class OpenBoxCopilotKitEmitter {
   public async emitActivityCompleted(
     input: ActivityCompletedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const payload = withBaseEnvelope({
-      activity_id: input.activityId,
-      activity_input: serializeActivityInput(input.activityArgs),
-      activity_output: serializeActivityOutput(input.activityOutput),
-      activity_type: input.toolName,
-      ...(typeof input.durationMs === "number"
-        ? { duration_ms: input.durationMs }
-        : {}),
-      ...(typeof input.endTime === "number" ? { end_time: input.endTime } : {}),
-      ...(input.error ? { error: input.error } : {}),
-      event_type: WorkflowEventType.ACTIVITY_COMPLETED,
-      ...(input.goal ? { goal: input.goal } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-      ...multiAgentFields(input),
-      run_id: input.runId,
-      ...(typeof input.startTime === "number"
-        ? { start_time: input.startTime }
-        : {}),
-      status: input.status,
-      workflow_id: input.workflowId,
-      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    const { payload } = prepareLifecyclePayload(buildActivityCompletedEnvelope(input), {
+      privacy: this.#privacy
     });
 
     return this.#evaluate(payload, {
@@ -263,6 +158,11 @@ export class OpenBoxCopilotKitEmitter {
    * Sibling event to `emitActivityCompleted` that carries the synthesized
    * `function_call` span. The same `activity_id` as the original completion
    * event ties both payloads together in OpenBox.
+   *
+   * Phase: hook-span migration deferred — this still hand-assembles its
+   * payload via `withBaseEnvelope`/`toWireSpan` rather than the base `hook()`
+   * factory (base hook payload assembly owns `spans`/`span_count`, which this
+   * adapter's `SpanBuffer`-derived `SpanData` shape isn't wired to yet).
    */
   public async emitActivityCompletedHook(
     input: ActivityCompletedHookInput
@@ -270,7 +170,7 @@ export class OpenBoxCopilotKitEmitter {
     const wireSpan = toWireSpan(input.span);
     const payload = withBaseEnvelope({
       activity_id: input.activityId,
-      activity_input: serializeActivityInput(input.activityArgs),
+      activity_input: serializeOrNull(input.activityArgs),
       activity_type: "function_call",
       ...(input.agentId ? { agent_id: input.agentId } : {}),
       attempt: 1,
@@ -301,22 +201,8 @@ export class OpenBoxCopilotKitEmitter {
   public async emitWorkflowCompleted(
     input: WorkflowCompletedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const payload = withBaseEnvelope({
-      ...(typeof input.durationMs === "number"
-        ? { duration_ms: input.durationMs }
-        : {}),
-      ...(typeof input.endTime === "number" ? { end_time: input.endTime } : {}),
-      event_type: WorkflowEventType.WORKFLOW_COMPLETED,
-      ...(input.goal ? { goal: input.goal } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-      ...multiAgentFields(input),
-      run_id: input.runId,
-      ...(typeof input.startTime === "number"
-        ? { start_time: input.startTime }
-        : {}),
-      workflow_id: input.workflowId,
-      workflow_output: serializeWorkflowOutput(input.agentOutput),
-      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    const { payload } = prepareLifecyclePayload(buildWorkflowCompletedEnvelope(input), {
+      privacy: this.#privacy
     });
 
     return this.#evaluate(payload, {
@@ -329,15 +215,8 @@ export class OpenBoxCopilotKitEmitter {
   public async emitWorkflowFailed(
     input: WorkflowFailedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const payload = withBaseEnvelope({
-      error: input.error,
-      event_type: WorkflowEventType.WORKFLOW_FAILED,
-      ...(input.goal ? { goal: input.goal } : {}),
-      ...(input.metadata ? { metadata: input.metadata } : {}),
-      ...multiAgentFields(input),
-      run_id: input.runId,
-      workflow_id: input.workflowId,
-      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    const { payload } = prepareLifecyclePayload(buildWorkflowFailedEnvelope(input), {
+      privacy: this.#privacy
     });
 
     return this.#evaluate(payload, {
@@ -397,12 +276,12 @@ export class OpenBoxCopilotKitEmitter {
 
     try {
       // The base client's `evaluate` takes a prepared `JsonValue` and
-      // resolves a base `EvaluationResult`. Payload assembly is still
-      // hand-built here (Phase 3 migrates it to the base gate/factories) —
-      // every field this SDK reads off the result (`verdict`, `reason`,
-      // `policyId`, `governanceEventId`, `approvalId`, ...) is named
-      // identically on both shapes, so this bridge is safe until Phase 3
-      // unifies the two types.
+      // resolves a base `EvaluationResult`. This SDK still reads that result
+      // through its own local `GovernanceVerdictResponse` shape — every field
+      // it reads off the result (`verdict`, `reason`, `policyId`,
+      // `governanceEventId`, `approvalId`, ...) is named identically on both
+      // shapes, so this bridge is safe until a later phase unifies the two
+      // types (`src/types/*` re-exports, out of this migration's scope).
       const result = await this.#client.evaluate(payload as unknown as JsonValue);
       return result as unknown as GovernanceVerdictResponse | null;
     } catch (err) {
@@ -466,6 +345,12 @@ export class OpenBoxCopilotKitEmitter {
 
 }
 
+/**
+ * Hand-built envelope wrapper still used by the two unmigrated payloads
+ * (`emitActivityCompletedHook`, `emitHandoff` below) — the six lifecycle/
+ * signal methods above build their envelope via `lifecycle-events.ts` and
+ * `prepareLifecyclePayload` instead.
+ */
 function withBaseEnvelope(
   payload: Record<string, unknown>
 ): Record<string, unknown> {
@@ -475,57 +360,6 @@ function withBaseEnvelope(
     timestamp: new Date().toISOString(),
     ...payload
   };
-}
-
-/**
- * Project the optional multi-agent fields onto a payload. Both keys are
- * omitted when unset, keeping single-agent payloads byte-identical to before.
- */
-function multiAgentFields(input: MultiAgentEventFields): Record<string, unknown> {
-  return {
-    ...(input.multiAgentSessionId
-      ? { multi_agent_session_id: input.multiAgentSessionId }
-      : {}),
-    ...(input.parentWorkflowId
-      ? { parent_workflow_id: input.parentWorkflowId }
-      : {})
-  };
-}
-
-function serializeWorkflowInput(value: unknown): unknown {
-  if (value === undefined) {
-    return null;
-  }
-  return safeSerialize(value);
-}
-
-function serializeWorkflowOutput(value: unknown): unknown {
-  if (value === undefined) {
-    return null;
-  }
-  return safeSerialize(value);
-}
-
-function serializeSignalArgs(value: unknown, asArray: boolean): unknown {
-  const serialized =
-    value === undefined || value === null ? null : safeSerialize(value);
-  // Multi-agent mode emits array-shaped signal args; standalone mode keeps the
-  // legacy `{ value }` wrapper.
-  return asArray ? [serialized] : { value: serialized };
-}
-
-function serializeActivityInput(value: unknown): unknown {
-  if (value === undefined) {
-    return null;
-  }
-  return safeSerialize(value);
-}
-
-function serializeActivityOutput(value: unknown): unknown {
-  if (value === undefined) {
-    return null;
-  }
-  return safeSerialize(value);
 }
 
 /**
@@ -564,20 +398,4 @@ function toWireSpan(span: SpanData): Record<string, unknown> {
   }
 
   return wire;
-}
-
-function safeSerialize(value: unknown): unknown {
-  if (value === null || typeof value !== "object") {
-    return value;
-  }
-
-  try {
-    return structuredClone(value);
-  } catch {
-    try {
-      return JSON.parse(JSON.stringify(value));
-    } catch {
-      return Object.prototype.toString.call(value);
-    }
-  }
 }

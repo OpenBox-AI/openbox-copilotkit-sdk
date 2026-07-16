@@ -135,7 +135,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
     expect(payload.workflow_output).toBe("the answer is 42");
   });
 
-  it("emitWorkflowFailed carries the error record", async () => {
+  it("emitWorkflowFailed carries the error record, converted to base ErrorInfo", async () => {
     const { controller, evaluateMock } = buildController();
     const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
 
@@ -148,7 +148,14 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
     expect(payload.event_type).toBe(WorkflowEventType.WORKFLOW_FAILED);
-    expect(payload.error).toEqual({ code: "boom", message: "explosion" });
+    // Base ErrorInfo requires `type` (never a bare string) — `code` has no
+    // dedicated ErrorInfo slot, so it falls back to `type` and is ALSO kept
+    // verbatim (existing readers of `error.code` keep working).
+    expect(payload.error).toEqual({
+      code: "boom",
+      message: "explosion",
+      type: "boom"
+    });
   });
 
   it("notifies the onEvent observer with eventType and payload", async () => {
