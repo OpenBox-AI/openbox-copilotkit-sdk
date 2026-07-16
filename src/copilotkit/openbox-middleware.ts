@@ -123,7 +123,7 @@ export class OpenBoxMiddleware extends Middleware {
     super();
     this.#runtime = runtime;
     this.#logger = runtime.logger;
-    this.#emitter = new OpenBoxCopilotKitEmitter(runtime, opts.onEvent);
+    this.#emitter = new OpenBoxCopilotKitEmitter(runtime, opts.onEvent, opts.redactPaths);
     this.#enforceApprovals = opts.enforceApprovals === true;
     this.#frontendToolNames = opts.frontendToolNames;
     this.#isFrontendTool = opts.isFrontendTool;
@@ -179,6 +179,18 @@ export class OpenBoxMiddleware extends Middleware {
 
       const enqueueHandling = (work: () => Promise<void>): void => {
         pendingHandling = pendingHandling.then(work).catch((err: unknown) => {
+          // RT-F4: a genuine governance/control error must never be
+          // laundered into a silent warn-and-continue — that would fail OPEN
+          // on an enforcement decision. Nothing reaches this catch from
+          // either of the two paths that make an enforcement decision today:
+          // the frontend-tool gate below is RETURN-based (a block resolves
+          // to `blockResult`, handled in `next` and never thrown), and every
+          // telemetry send failure is isolated INSIDE the bounded queue
+          // (`lifecycle-telemetry.ts`'s `failedTelemetrySends` +
+          // `onDiagnostic`) — `#emitter.emit*()` never propagates a rejected
+          // `evaluate` out to its caller. This catch is therefore a true
+          // last-resort for an unrelated bug, not a place governance
+          // decisions can be silently swallowed.
           this.#logger.warn?.({
             err,
             note: "openbox middleware handler error swallowed",
@@ -187,54 +199,71 @@ export class OpenBoxMiddleware extends Middleware {
         });
       };
 
-      const subscription = source.subscribe({
-        next: eventWithState => {
-          if (blocked) {
-            return;
-          }
-
-          const event = eventWithState.event;
-
-          enqueueHandling(async () => {
-            const blockResult = await this.#handleEvent(state, event);
-            if (blockResult) {
-              blocked = true;
-              subscriber.next(blockResult);
-              subscriber.complete();
-              return;
-            }
-
-            if (!blocked) {
-              subscriber.next(event);
-            }
-          });
-        },
-        error: err => {
-          enqueueHandling(async () => {
-            await this.#emitWorkflowFailedFromError(state, err);
-            subscriber.error(err);
-          });
-        },
-        complete: () => {
-          pendingHandling
-            .then(() => {
-              if (!blocked) {
-                subscriber.complete();
+      // Bind the per-run context store (D7) for the entire async lifetime of
+      // this subscription — wrapping `source.subscribe` (not `run()`'s body
+      // and not the RUN_STARTED handler) so `currentRunContext()` is
+      // available to the tool-execution async chain the subscribe() call
+      // sets up (Phase 5 reads it). Two concurrent runs never cross-observe
+      // each other's ids (standard `AsyncLocalStorage` isolation).
+      const subscription = this.#runtime.runContext.enterRunContext(
+        { runId: input.runId, workflowId: input.threadId },
+        () =>
+          source.subscribe({
+            next: eventWithState => {
+              if (blocked) {
+                return;
               }
-            })
-            .catch((complErr: unknown) => {
-              this.#logger.warn?.({
-                err: complErr,
-                note: "openbox middleware completion error swallowed",
-                workflow_id: state.workflowId
+
+              const event = eventWithState.event;
+
+              enqueueHandling(async () => {
+                const blockResult = await this.#handleEvent(state, event);
+                if (blockResult) {
+                  blocked = true;
+                  subscriber.next(blockResult);
+                  subscriber.complete();
+                  return;
+                }
+
+                if (!blocked) {
+                  subscriber.next(event);
+                }
               });
-              subscriber.complete();
-            });
-        }
-      });
+            },
+            error: err => {
+              enqueueHandling(async () => {
+                await this.#emitWorkflowFailedFromError(state, err);
+                subscriber.error(err);
+              });
+            },
+            complete: () => {
+              pendingHandling
+                .then(() => {
+                  if (!blocked) {
+                    subscriber.complete();
+                  }
+                })
+                .catch((complErr: unknown) => {
+                  this.#logger.warn?.({
+                    err: complErr,
+                    note: "openbox middleware completion error swallowed",
+                    workflow_id: state.workflowId
+                  });
+                  subscriber.complete();
+                });
+            }
+          })
+      );
 
       return () => {
         subscription.unsubscribe();
+        // Defensive, idempotent cleanup of the queue's per-run truncation
+        // flag for a run that never reaches a terminal telemetry event —
+        // e.g. an early client-disconnect unsubscribe. The normal case
+        // (terminal event observed) already clears it inside the queue
+        // itself; the queue's chain-map bookkeeping self-cleans separately
+        // once a run's own last send settles, regardless of this call.
+        this.#runtime.telemetryQueue.endRun(state.runId);
       };
     });
   }
@@ -520,19 +549,25 @@ export class OpenBoxMiddleware extends Middleware {
     if (entry.activityStarted) {
       return undefined;
     }
-    const verdict = await this.#emitter.emitActivityStarted({
-      activityArgs: entry.activityArgs,
-      activityId,
-      agentId,
-      frontend: entry.frontend,
-      goal,
-      metadata,
-      multiAgentSessionId: state.multiAgentSessionId,
-      runId: state.runId,
-      toolName: entry.toolName,
-      toolOrigin: TOOL_ORIGIN,
-      workflowId: state.workflowId
-    });
+    // Phase 4/5: buffer frontend-enforce triple (hold TOOL_CALL_START/ARGS/END
+    // together until the verdict resolves, not END-only) — deferred; the
+    // enforcing gate below is unchanged from before this phase.
+    const verdict = await this.#emitter.emitActivityStarted(
+      {
+        activityArgs: entry.activityArgs,
+        activityId,
+        agentId,
+        frontend: entry.frontend,
+        goal,
+        metadata,
+        multiAgentSessionId: state.multiAgentSessionId,
+        runId: state.runId,
+        toolName: entry.toolName,
+        toolOrigin: TOOL_ORIGIN,
+        workflowId: state.workflowId
+      },
+      { enforce: this.#enforceApprovals }
+    );
     entry.activityStarted = true;
     entry.lastVerdict = verdict;
     if (this.#enforceApprovals && shouldBlock(verdict)) {

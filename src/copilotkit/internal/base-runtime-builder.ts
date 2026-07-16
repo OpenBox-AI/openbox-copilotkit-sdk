@@ -7,6 +7,7 @@ import { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 
 import type { OpenBoxConfigInput } from "../../config/openbox-config.js";
 import { SDK_METADATA } from "../../sdk-metadata.js";
+import { LifecycleTelemetryQueue, type TelemetryQueueOptions } from "../lifecycle-telemetry.js";
 import type { OpenBoxLogger } from "../types.js";
 
 import { RunContextStore } from "./run-context-store.js";
@@ -20,11 +21,15 @@ export interface BuildBaseRuntimeOptions {
   logger?: OpenBoxLogger;
   /** Bounds an in-flight HITL approval wait; `null` opts into an infinite wait. */
   approvalMaxWaitMs?: number | null;
+  /** Bounded, non-blocking telemetry-queue configuration (Phase 3, fixes B4). */
+  telemetry?: TelemetryQueueOptions;
 }
 
 export interface BaseRuntimeBundle {
   runtime: OpenBoxRuntime;
   runContext: RunContextStore;
+  /** The ONE bounded telemetry sender this controller owns — see `shutdown`'s drain-before-close order. */
+  telemetryQueue: LifecycleTelemetryQueue;
   /** Idempotent — safe to call more than once; later calls resolve the first call's promise. */
   shutdown: () => Promise<void>;
 }
@@ -97,28 +102,41 @@ export function buildBaseRuntime(
   // controller — never a process-global.
   const runContext = new RunContextStore();
 
+  // The ONE bounded, non-blocking telemetry sender this controller owns
+  // (Phase 3, fixes B4) — constructed once here so `maxConcurrentSends`/
+  // `maxPendingEvents` bound resource use across every run this controller
+  // serves, never per-middleware-instance (see `types.ts`'s
+  // `OpenBoxMiddlewareOptions.telemetry` doc).
+  const telemetryQueue = new LifecycleTelemetryQueue(
+    { client, ...(opts.logger ? { logger: opts.logger } : {}) },
+    opts.telemetry
+  );
+
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
     if (!shutdownPromise) {
-      // Teardown order matters (RT-F10):
-      //   1. stop new runs (Phase 5 adds a real latch here, refusing new
-      //      child runtimes before closing the child-client cache)
-      //   2. abort in-flight approvals (below) — never resolve-and-execute
-      //      after shutdown has started
-      //   3. drain the bounded telemetry queue (Phase 3 stub)
-      //   4. flush instrumentation + restore patched globals (Phase 6 stub)
-      //   5. close the runtime last
-      shutdownController.abort();
-      // Phase 3: drain the bounded telemetry queue before closing.
-      // Phase 6: flush instrumentation + restore any patched globals.
-      // Phase 5: await in-flight handoffs, then close cached child runtimes.
-      runtime.close();
-      shutdownPromise = Promise.resolve();
+      shutdownPromise = (async () => {
+        // Teardown order matters (RT-F10):
+        //   1. stop new runs (Phase 5 adds a real latch here, refusing new
+        //      child runtimes before closing the child-client cache)
+        //   2. abort in-flight approvals (below) — never resolve-and-execute
+        //      after shutdown has started
+        //   3. drain the bounded telemetry queue (Phase 3) — bounded by
+        //      `flushTimeoutMs`; the queue itself reports+diagnoses any count
+        //      still pending after the timeout, never blocking shutdown.
+        //   4. flush instrumentation + restore patched globals (Phase 6 stub)
+        //   5. close the runtime last
+        shutdownController.abort();
+        await telemetryQueue.flush();
+        // Phase 6: flush instrumentation + restore any patched globals.
+        // Phase 5: await in-flight handoffs, then close cached child runtimes.
+        runtime.close();
+      })();
     }
     return shutdownPromise;
   };
 
-  return { runtime, runContext, shutdown };
+  return { runtime, runContext, telemetryQueue, shutdown };
 }
 
 /**

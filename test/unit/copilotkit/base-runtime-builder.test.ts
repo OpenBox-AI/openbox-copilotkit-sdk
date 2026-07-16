@@ -97,6 +97,58 @@ describe("buildBaseRuntime", () => {
     expect(closeSpy).toHaveBeenCalledTimes(1);
   });
 
+  it("exposes one telemetryQueue instance and drains it BEFORE closing the runtime (Phase 3 teardown order)", async () => {
+    const built = buildBaseRuntime(CONFIG);
+    expect(built.telemetryQueue).toBeDefined();
+
+    const order: string[] = [];
+    const flushSpy = vi
+      .spyOn(built.telemetryQueue, "flush")
+      .mockImplementation(async () => {
+        order.push("flush");
+        return { notFlushed: 0 };
+      });
+    const closeSpy = vi.spyOn(built.runtime, "close").mockImplementation(() => {
+      order.push("close");
+    });
+
+    await built.shutdown();
+
+    expect(flushSpy).toHaveBeenCalledTimes(1);
+    expect(closeSpy).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["flush", "close"]);
+  });
+
+  it("threads telemetry options into the queue it constructs", async () => {
+    // This test only cares whether the option reached the queue instance
+    // (proven by the overflow below), never whether a send actually
+    // completes — stub `fetch` so it doesn't attempt a real network call.
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("no network in this test"));
+
+    const onDiagnostic = vi.fn();
+    const built = buildBaseRuntime(CONFIG, {
+      telemetry: { maxPendingEvents: 1, onDiagnostic }
+    });
+
+    // Two synchronous enqueues against a cap of 1 — the second overflows,
+    // proving the configured option actually reached the queue instance.
+    built.telemetryQueue.enqueue({
+      eventType: "WorkflowStarted",
+      isTerminal: false,
+      payload: { event_type: "WorkflowStarted", run_id: "run-1", workflow_id: "wf-1" },
+      runId: "run-1"
+    });
+    built.telemetryQueue.enqueue({
+      eventType: "SignalReceived",
+      isTerminal: false,
+      payload: { event_type: "SignalReceived", run_id: "run-1", workflow_id: "wf-1" },
+      runId: "run-1"
+    });
+
+    expect(onDiagnostic).toHaveBeenCalledWith(expect.objectContaining({ reason: "queue-overflow" }));
+    await built.shutdown();
+  });
+
   describe("module import — global purity", () => {
     it("does not mutate globalThis.fetch", async () => {
       const fetchBefore = globalThis.fetch;

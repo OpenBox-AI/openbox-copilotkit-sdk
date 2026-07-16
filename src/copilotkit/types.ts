@@ -4,6 +4,7 @@ import type { SpanBuffer } from "../spans/span-buffer.js";
 
 import type { RunContextStore } from "./internal/run-context-store.js";
 import type { ServerToolOwnershipRegistry } from "./internal/server-tool-ownership.js";
+import type { LifecycleTelemetryQueue, TelemetryQueueOptions } from "./lifecycle-telemetry.js";
 
 /**
  * Lightweight logger contract. Module-local; matches a console-style surface
@@ -34,13 +35,18 @@ export interface OpenBoxRuntimeDefaults {
  * client, adapter, and the base per-runtime `ContextStore` all live on it —
  * see `internal/base-runtime-builder.ts`). `runContext` is a SEPARATE,
  * small, controller-owned per-run store (Decision D7) — do not conflate the
- * two. `serverToolOwnership` is a run-scoped `(runId, toolCallId)` registry
+ * two. `telemetryQueue` is the ONE bounded, non-blocking telemetry sender
+ * (Phase 3, fixes B4) this controller owns — constructed once alongside
+ * `runtime` so cross-run concurrency/pending bounds apply across every
+ * request this controller serves, never per-middleware-instance.
+ * `serverToolOwnership` is a run-scoped `(runId, toolCallId)` registry
  * the server-tool wrapper (Phase 5) claims to suppress a duplicate AG-UI
  * observation for the same call.
  */
 export interface OpenBoxRuntimeController {
   runtime: OpenBoxRuntime;
   runContext: RunContextStore;
+  telemetryQueue: LifecycleTelemetryQueue;
   defaults: OpenBoxRuntimeDefaults;
   logger: OpenBoxLogger;
   serverToolOwnership: ServerToolOwnershipRegistry;
@@ -78,8 +84,20 @@ export interface OpenBoxMiddlewareOptions {
   /**
    * Optional JSONPath-like paths to redact from tool args/result previews.
    * Recommended starter set: `["$..password", "$..secret", "$..token", "$..apiKey"]`.
+   * Applied both as a precise CopilotKit-side redactor on raw activity/signal
+   * fields AND translated into the base gate's key-name `redactKeys` (RT-F2).
    */
   redactPaths?: string[];
+  /**
+   * Bounded, non-blocking telemetry-queue configuration (fixes B4). Read ONCE
+   * — at the first `createOpenBoxMiddleware`/`withOpenBoxRuntime` call that
+   * builds this controller's `telemetryQueue` (see `internal/base-runtime-builder.ts`);
+   * the queue is a single instance shared by every run this controller
+   * serves, so a later `createOpenBoxMiddleware` call on the SAME controller
+   * cannot reconfigure it. Full deprecated-alias mapping (e.g. the removed
+   * `maxEvaluatePayloadBytes`) is deferred to Phase 6.
+   */
+  telemetry?: TelemetryQueueOptions;
 }
 
 /**

@@ -14,10 +14,6 @@ import {
   collectEvents
 } from "../unit/copilotkit/test-utils.js";
 
-function flushMacrotask(): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, 0));
-}
-
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -130,23 +126,32 @@ describe("evaluate() payload baseline", () => {
 });
 
 /**
- * FREEZE (Phase 1 — defect B4). The 0.3.0 middleware forwards each AG-UI event
- * to the user stream only *after* awaiting that event's `client.evaluate()`,
- * and serially (the `pendingHandling` chain in `#processStream`). So a slow or
- * hung Core throttles the user-visible stream even in telemetry-only mode.
+ * INVERTED (Phase 3b — defect B4 FIXED; was FROZEN as the buggy baseline in
+ * Phase 1). The 0.3.0 middleware forwarded each AG-UI event to the user
+ * stream only *after* awaiting that event's `client.evaluate()`, serially
+ * (the `pendingHandling` chain in `#processStream`) — a slow or hung Core
+ * throttled the user-visible stream even in telemetry-only mode.
  *
- * This test blocks the FIRST evaluate (RUN_STARTED's WorkflowStarted) and shows
- * the entire downstream stream stalls — no events reach the subscriber until
- * evaluate resolves. Phase 3 INVERTS this: a bounded non-blocking telemetry
- * queue forwards events without awaiting Core.
+ * Phase 3b's bounded, non-blocking telemetry queue (`lifecycle-telemetry.ts`)
+ * fixes this: the five pure-telemetry emitter methods enqueue and return
+ * before `client.evaluate` settles, so `#processStream` forwards every AG-UI
+ * event regardless of Core's latency. This test DEFERS THE FIRST EVALUATE
+ * (RUN_STARTED's WorkflowStarted) FOREVER — it is never resolved for the
+ * remainder of the test — and asserts every event still reaches the
+ * subscriber and the stream still completes. This is a real assertion, not a
+ * relaxed one: were forwarding still gated on Core (the old bug), `forwarded`
+ * would stay empty and `completed` would stay false, exactly as the frozen
+ * baseline this test replaces used to assert.
  */
-describe("telemetry ordering baseline (defect B4, frozen)", () => {
-  it("does not forward ANY AG-UI event until the in-flight evaluate resolves", async () => {
-    const firstEvaluate = defer<null>();
+describe("telemetry ordering fixed (defect B4)", () => {
+  it("forwards every AG-UI event and completes the stream without the deferred evaluate ever resolving", async () => {
+    const deferredEvaluate = defer<null>();
     let calls = 0;
     const evaluateMock = vi.fn().mockImplementation(() => {
       calls += 1;
-      return calls === 1 ? firstEvaluate.promise : Promise.resolve(null);
+      // Only the FIRST evaluate (RUN_STARTED's WorkflowStarted) is deferred;
+      // every other telemetry send resolves immediately.
+      return calls === 1 ? deferredEvaluate.promise : Promise.resolve(null);
     });
 
     const { controller } = buildController({ evaluateMock });
@@ -167,21 +172,30 @@ describe("telemetry ordering baseline (defect B4, frozen)", () => {
       }
     });
 
-    // Let all microtasks drain while the first evaluate is still pending.
-    await flushMacrotask();
-
-    // BUG B4: the stream is blocked on telemetry — nothing forwarded yet.
-    expect(calls).toBeGreaterThanOrEqual(1);
-    expect(forwarded).toHaveLength(0);
-    expect(completed).toBe(false);
-    // PHASE-3 WILL INVERT: telemetry-only mode forwards events without awaiting Core.
-
-    // Release Core; the whole serial chain now drains to completion.
-    firstEvaluate.resolve(null);
+    // Wait for the stream's OWN completion signal — never for the deferred
+    // evaluate (this test never resolves it). AG-UI's own `runNextWithState`
+    // paces each event through its own `setTimeout(0)` hop independent of
+    // anything here, so a fixed microtask/macrotask count can't stand in for
+    // this; only the real signal proves the point. If forwarding/completion
+    // were still gated on Core (the B4 bug), this would hang instead of
+    // resolving (the deferred evaluate never settles for the test's duration).
     await done.promise;
 
-    expect(forwarded.length).toBeGreaterThan(0);
+    // B4 FIXED: the whole run forwarded and completed WITHOUT the first
+    // evaluate ever resolving.
+    expect(calls).toBeGreaterThanOrEqual(1);
     expect(completed).toBe(true);
+    expect(forwarded.map(e => e.type)).toEqual([
+      EventType.RUN_STARTED,
+      EventType.TEXT_MESSAGE_START,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_CONTENT,
+      EventType.TEXT_MESSAGE_END,
+      EventType.RUN_FINISHED
+    ]);
+
     subscription.unsubscribe();
+    // Release the deferred evaluate so nothing lingers past the test.
+    deferredEvaluate.resolve(null);
   });
 });

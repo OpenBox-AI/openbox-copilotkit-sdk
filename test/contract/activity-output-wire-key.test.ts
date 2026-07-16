@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { OpenBoxCopilotKitEmitter } from "../../src/copilotkit/openbox-emitter.js";
 import { WorkflowEventType } from "../../src/types/workflow-event-type.js";
 
-import { buildController } from "../unit/copilotkit/test-utils.js";
+import { buildController, flushMacrotask } from "../unit/copilotkit/test-utils.js";
 
 /**
  * FREEZE (Phase 1 / Decision D6 / Prerequisite P0a).
@@ -18,6 +18,12 @@ import { buildController } from "../unit/copilotkit/test-utils.js";
  *
  * This test is the regression guard Phase 3 must keep green when it stops
  * hand-assembling the payload and delegates to the base `1.0.1` factory.
+ *
+ * Phase 3b note: `emitActivityCompleted` is now pure telemetry — it enqueues
+ * on the bounded, non-blocking queue (fixes B4) and returns before the send
+ * reaches `client.evaluate`. `flushMacrotask()` lets that background send
+ * settle before this test inspects `evaluateMock`; the WIRE-SHAPE assertions
+ * below (the actual regression guard) are unchanged.
  */
 describe("wire contract: ActivityCompleted output key (activity_output, not result)", () => {
   it("emitActivityCompleted writes tool output under `activity_output` and never `result`", async () => {
@@ -32,6 +38,7 @@ describe("wire contract: ActivityCompleted output key (activity_output, not resu
       toolName: "chargeCard",
       workflowId: "thread-1"
     });
+    await flushMacrotask();
 
     expect(evaluateMock).toHaveBeenCalledTimes(1);
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
@@ -61,6 +68,7 @@ describe("wire contract: ActivityCompleted output key (activity_output, not resu
       toolName: "lookup",
       workflowId: "thread-1"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload["activity_output"]).toEqual(output);

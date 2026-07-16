@@ -4,6 +4,7 @@ import {
   type BaseEvent,
   type RunAgentInput
 } from "@ag-ui/client";
+import type { OpenBoxClient as BaseOpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
 import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 import { EMPTY, Observable } from "rxjs";
 import { vi, type Mock } from "vitest";
@@ -11,6 +12,7 @@ import { vi, type Mock } from "vitest";
 import { OpenBoxClient } from "../../../src/client/openbox-client.js";
 import { RunContextStore } from "../../../src/copilotkit/internal/run-context-store.js";
 import { ServerToolOwnershipRegistry } from "../../../src/copilotkit/internal/server-tool-ownership.js";
+import { LifecycleTelemetryQueue } from "../../../src/copilotkit/lifecycle-telemetry.js";
 import type {
   OpenBoxLogger,
   OpenBoxRuntimeController
@@ -120,9 +122,20 @@ export function buildController(
   (client as unknown as { pollApproval: Mock }).pollApproval = pollApprovalMock;
 
   const logger: OpenBoxLogger & { warn: Mock } = { warn: vi.fn() };
+  // A REAL queue (not a mock) — tests exercise the actual bounded-queue
+  // mechanics (per-run FIFO, concurrency, overflow) through the SAME
+  // `evaluateMock`-backed client the middleware/emitter already use. Cast
+  // needed because this stand-in `client` is the LEGACY adapter-owned
+  // `OpenBoxClient` (different `evaluate` signature) — same test-only
+  // convenience cast `buildRuntimeStandIn` already applies below.
+  const telemetryQueue = new LifecycleTelemetryQueue({
+    client: client as unknown as Pick<BaseOpenBoxClient, "evaluate">,
+    logger
+  });
   const controller: OpenBoxRuntimeController = {
     runtime: buildRuntimeStandIn(client),
     runContext: new RunContextStore(),
+    telemetryQueue,
     defaults: { agentId: "test-agent", workflowType: "copilotkit" },
     logger,
     serverToolOwnership: new ServerToolOwnershipRegistry()
@@ -151,6 +164,20 @@ export function buildRunAgentInput(
   } as RunAgentInput;
 }
 
+/**
+ * Wait a full macrotask tick — the entire current microtask queue (however
+ * many `.then()` hops deep) drains before a `setTimeout` callback runs. Used
+ * to deterministically observe telemetry the bounded queue (Phase 3, fixes
+ * B4) sends in the background: since `emitWorkflowStarted`/etc. now enqueue
+ * and return immediately rather than awaiting `client.evaluate`, a run's
+ * Observable can complete before its LAST telemetry send has reached the
+ * (mocked) client — asserting on `evaluateMock.mock.calls` requires letting
+ * that background work settle first.
+ */
+export function flushMacrotask(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
 export function collectEvents(
   observable: Observable<BaseEvent>
 ): Promise<BaseEvent[]> {
@@ -161,10 +188,12 @@ export function collectEvents(
         events.push(e);
       },
       error: err => {
-        reject(err instanceof Error ? err : new Error(String(err)));
+        void flushMacrotask().then(() => {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        });
       },
       complete: () => {
-        resolve(events);
+        void flushMacrotask().then(() => resolve(events));
       }
     });
   });

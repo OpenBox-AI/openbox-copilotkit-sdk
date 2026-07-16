@@ -1,6 +1,6 @@
 import { prepareLifecyclePayload, type JsonValue } from "@openbox-ai/openbox-sdk-ts";
 import type { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
-import type { PrivacyConfig } from "@openbox-ai/openbox-sdk-ts/config";
+import { defaultPrivacyConfig, type PrivacyConfig } from "@openbox-ai/openbox-sdk-ts/config";
 
 import type { OpenBoxClient as LegacyOpenBoxClient } from "../client/openbox-client.js";
 import type { SpanData } from "../spans/index.js";
@@ -25,6 +25,8 @@ import {
   type WorkflowFailedInput,
   type WorkflowStartedInput
 } from "./lifecycle-events.js";
+import { redactAndBoundRawField, redactPathsToKeySet } from "./lifecycle-redaction.js";
+import type { LifecycleTelemetryQueue } from "./lifecycle-telemetry.js";
 import type {
   OpenBoxEmission,
   OpenBoxMiddlewareOptions,
@@ -73,85 +75,140 @@ export interface HandoffEmitInput {
 /**
  * Wraps `client.evaluate` for CopilotKit-observed AG-UI events. The six
  * lifecycle/signal methods below build a base `EventEnvelope` via
- * `lifecycle-events.ts`, run it through the base strict gate
- * (`prepareLifecyclePayload`), then hand the exact prepared wire payload to
- * `onEvent` and `client.evaluate` — no hand-built snake_case object remains
- * for those six. `emitActivityCompletedHook` (hook-span) and `emitHandoff`
- * still hand-assemble their payload via `withBaseEnvelope`/`toWireSpan`
- * (migration deferred — see each method's own note). Emitter failures are
- * logged and swallowed so telemetry cannot break the user stream. Verdict
- * objects are returned to callers that enforce approvals.
+ * `lifecycle-events.ts` and run it through the base strict gate
+ * (`prepareLifecyclePayload`) — no hand-built snake_case object remains for
+ * those six. Five of them are PURE TELEMETRY (post-operation, observation
+ * only): they enqueue the prepared payload on the bounded, non-blocking
+ * `LifecycleTelemetryQueue` (Phase 3, fixes B4) and return immediately —
+ * `onEvent` fires with the exact payload on QUEUE ACCEPTANCE, never gated on
+ * Core. `emitActivityStarted` is the exception: it is the ENFORCING
+ * pre-execution gate for a frontend-tool call — in `{ enforce: true }` mode it
+ * still awaits `client.evaluate` directly and returns the verdict (used by
+ * the middleware's `shouldBlock` check); otherwise it enqueues like the other
+ * five and returns `null`. `emitActivityCompletedHook` (hook-span) and
+ * `emitHandoff` still hand-assemble their payload via
+ * `withBaseEnvelope`/`toWireSpan` and always evaluate directly (migration
+ * deferred — see each method's own note; explicitly out of scope for Phase
+ * 3b). Emitter/queue failures are logged and swallowed so telemetry can never
+ * break the user stream.
  */
 export class OpenBoxCopilotKitEmitter {
   readonly #client: OpenBoxClient;
   readonly #logger: OpenBoxRuntimeController["logger"];
   readonly #onEvent: OpenBoxMiddlewareOptions["onEvent"];
   readonly #privacy: PrivacyConfig;
+  readonly #redactPaths: string[] | undefined;
+  readonly #telemetryQueue: LifecycleTelemetryQueue;
 
   public constructor(
     controller: OpenBoxRuntimeController,
-    onEvent: OpenBoxMiddlewareOptions["onEvent"]
+    onEvent: OpenBoxMiddlewareOptions["onEvent"],
+    redactPaths?: string[]
   ) {
     this.#client = controller.runtime.client;
     this.#logger = controller.logger;
     this.#onEvent = onEvent;
-    this.#privacy = controller.runtime.config.privacy;
+    this.#redactPaths = redactPaths;
+    this.#privacy = mergeRedactPathsIntoPrivacy(controller.runtime.config.privacy, redactPaths);
+    this.#telemetryQueue = controller.telemetryQueue;
   }
 
-  public async emitWorkflowStarted(
+  // Not `async`: pure telemetry — enqueue is synchronous and the method must
+  // return without ever awaiting the actual send (B4 fix). Explicitly wraps
+  // `null` in a resolved promise to keep the same `Promise<...>`-returning
+  // signature every emit* method shares.
+  public emitWorkflowStarted(
     input: WorkflowStartedInput
   ): Promise<GovernanceVerdictResponse | null> {
     const { payload } = prepareLifecyclePayload(buildWorkflowStartedEnvelope(input), {
       privacy: this.#privacy
     });
 
-    return this.#evaluate(payload, {
+    this.#enqueueTelemetry(payload, {
       activityId: undefined,
       eventType: WorkflowEventType.WORKFLOW_STARTED,
       workflowId: input.workflowId
-    });
+    }, input.runId, false);
+    return Promise.resolve(null);
   }
 
-  public async emitSignalReceived(
+  public emitSignalReceived(
     input: SignalEmitInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const { payload } = prepareLifecyclePayload(buildSignalReceivedEnvelope(input), {
+    const boundedInput: SignalEmitInput = {
+      ...input,
+      payload: this.#redactAndBound(input.payload)
+    };
+    const { payload } = prepareLifecyclePayload(buildSignalReceivedEnvelope(boundedInput), {
       privacy: this.#privacy
     });
 
-    return this.#evaluate(payload, {
+    this.#enqueueTelemetry(payload, {
       activityId: undefined,
       eventType: WorkflowEventType.SIGNAL_RECEIVED,
       workflowId: input.workflowId
-    });
+    }, input.runId, false);
+    return Promise.resolve(null);
   }
 
+  /**
+   * The enforcing pre-execution gate for a frontend-tool call. `opts.enforce`
+   * (set by the middleware from its own `enforceApprovals` flag) selects the
+   * path: `true` awaits `client.evaluate` directly and returns the verdict so
+   * the caller can block; otherwise (the default, telemetry-only mode) this
+   * enqueues like the other five lifecycle methods and returns `null` —
+   * NEVER applying a blocking verdict to a call the middleware isn't holding
+   * for approval.
+   */
   public async emitActivityStarted(
-    input: ActivityStartedInput
+    input: ActivityStartedInput,
+    opts: { enforce?: boolean } = {}
   ): Promise<GovernanceVerdictResponse | null> {
-    const { payload } = prepareLifecyclePayload(buildActivityStartedEnvelope(input), {
+    const boundedInput: ActivityStartedInput = {
+      ...input,
+      ...(input.activityArgs !== undefined
+        ? { activityArgs: this.#redactAndBound(input.activityArgs) }
+        : {})
+    };
+    const { payload } = prepareLifecyclePayload(buildActivityStartedEnvelope(boundedInput), {
       privacy: this.#privacy
     });
-
-    return this.#evaluate(payload, {
+    const emissionMeta = {
       activityId: input.activityId,
       eventType: WorkflowEventType.ACTIVITY_STARTED,
       workflowId: input.workflowId
-    });
+    };
+
+    if (opts.enforce) {
+      return this.#evaluate(payload, emissionMeta);
+    }
+
+    this.#enqueueTelemetry(payload, emissionMeta, input.runId, false);
+    return null;
   }
 
-  public async emitActivityCompleted(
+  public emitActivityCompleted(
     input: ActivityCompletedInput
   ): Promise<GovernanceVerdictResponse | null> {
-    const { payload } = prepareLifecyclePayload(buildActivityCompletedEnvelope(input), {
+    const boundedInput: ActivityCompletedInput = {
+      ...input,
+      ...(input.activityArgs !== undefined
+        ? { activityArgs: this.#redactAndBound(input.activityArgs) }
+        : {}),
+      ...(input.activityOutput !== undefined
+        ? { activityOutput: this.#redactAndBound(input.activityOutput) }
+        : {})
+    };
+    const { payload } = prepareLifecyclePayload(buildActivityCompletedEnvelope(boundedInput), {
       privacy: this.#privacy
     });
 
-    return this.#evaluate(payload, {
+    this.#enqueueTelemetry(payload, {
       activityId: input.activityId,
       eventType: WorkflowEventType.ACTIVITY_COMPLETED,
       workflowId: input.workflowId
-    });
+    }, input.runId, false);
+    return Promise.resolve(null);
   }
 
   /**
@@ -198,32 +255,34 @@ export class OpenBoxCopilotKitEmitter {
     });
   }
 
-  public async emitWorkflowCompleted(
+  public emitWorkflowCompleted(
     input: WorkflowCompletedInput
   ): Promise<GovernanceVerdictResponse | null> {
     const { payload } = prepareLifecyclePayload(buildWorkflowCompletedEnvelope(input), {
       privacy: this.#privacy
     });
 
-    return this.#evaluate(payload, {
+    this.#enqueueTelemetry(payload, {
       activityId: undefined,
       eventType: WorkflowEventType.WORKFLOW_COMPLETED,
       workflowId: input.workflowId
-    });
+    }, input.runId, true);
+    return Promise.resolve(null);
   }
 
-  public async emitWorkflowFailed(
+  public emitWorkflowFailed(
     input: WorkflowFailedInput
   ): Promise<GovernanceVerdictResponse | null> {
     const { payload } = prepareLifecyclePayload(buildWorkflowFailedEnvelope(input), {
       privacy: this.#privacy
     });
 
-    return this.#evaluate(payload, {
+    this.#enqueueTelemetry(payload, {
       activityId: undefined,
       eventType: WorkflowEventType.WORKFLOW_FAILED,
       workflowId: input.workflowId
-    });
+    }, input.runId, true);
+    return Promise.resolve(null);
   }
 
   /**
@@ -266,6 +325,37 @@ export class OpenBoxCopilotKitEmitter {
     }
 
     return this.#evaluateWithLegacyClient(client, payload, emissionMeta);
+  }
+
+  /**
+   * Enqueue a prepared telemetry payload on the bounded, non-blocking queue
+   * (Phase 3, fixes B4) and return immediately — the caller never awaits
+   * delivery. `onAccepted` bridges the queue's "accepted for delivery"
+   * signal into this emitter's own defensive `#notifyObserver`, so `onEvent`
+   * fires with the exact bounded payload on queue acceptance and a
+   * dropped/diverted item is never observed through it (only `onDiagnostic`,
+   * owned by the queue, sees those).
+   */
+  #enqueueTelemetry(
+    payload: Record<string, JsonValue>,
+    emissionMeta: Pick<OpenBoxEmission, "activityId" | "eventType" | "workflowId">,
+    runId: string,
+    isTerminal: boolean
+  ): void {
+    this.#telemetryQueue.enqueue({
+      eventType: emissionMeta.eventType,
+      isTerminal,
+      onAccepted: accepted => {
+        this.#notifyObserver(accepted, emissionMeta);
+      },
+      payload,
+      runId
+    });
+  }
+
+  /** RT-F2(b): path-redact + size-bound a raw activity/signal field before it reaches a base event factory. */
+  #redactAndBound(value: unknown): JsonValue | undefined {
+    return redactAndBoundRawField(value, this.#redactPaths);
   }
 
   async #evaluate(
@@ -343,6 +433,31 @@ export class OpenBoxCopilotKitEmitter {
     }
   }
 
+}
+
+/**
+ * RT-F2(a): translate `redactPaths` (JSONPath-like) into the leaf key-NAME
+ * set the base gate's `PrivacyConfig.redactKeys` expects (deep, case-
+ * insensitive key-name redaction — see `serialization/index.ts#applyRedaction`
+ * in the base SDK), and merge it into whatever `redactKeys` the resolved base
+ * runtime config already carries. Returns the ORIGINAL config unchanged when
+ * there is nothing to add (no new object, no risk of mutating a config object
+ * shared by another middleware instance on the same controller); otherwise
+ * returns a NEW `PrivacyConfig` — the shared base config is never mutated.
+ */
+function mergeRedactPathsIntoPrivacy(
+  base: PrivacyConfig | undefined,
+  redactPaths: string[] | undefined
+): PrivacyConfig {
+  const extraKeys = redactPathsToKeySet(redactPaths);
+  if (extraKeys.size === 0) {
+    return base ?? defaultPrivacyConfig();
+  }
+  const redactKeys = new Set(base?.redactKeys ?? []);
+  for (const key of extraKeys) {
+    redactKeys.add(key);
+  }
+  return { maxBodySize: base?.maxBodySize ?? defaultPrivacyConfig().maxBodySize, redactKeys };
 }
 
 /**

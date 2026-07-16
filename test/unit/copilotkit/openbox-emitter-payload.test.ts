@@ -4,7 +4,15 @@ import type { OpenBoxClient } from "../../../src/client/openbox-client.js";
 import { OpenBoxCopilotKitEmitter } from "../../../src/copilotkit/openbox-emitter.js";
 import { WorkflowEventType } from "../../../src/types/workflow-event-type.js";
 
-import { buildController } from "./test-utils.js";
+import { buildController, flushMacrotask } from "./test-utils.js";
+
+// Phase 3b (B4 fix): the six lifecycle/signal methods below are pure
+// telemetry — they enqueue on the bounded, non-blocking queue and return
+// before the send reaches `client.evaluate`. `flushMacrotask()` lets that
+// background send settle before a test inspects `evaluateMock`; every
+// PAYLOAD-SHAPE assertion (the actual thing these tests guard) is unchanged.
+// `emitHandoff`/`emitActivityCompletedHook` are unaffected (still direct,
+// legacy paths — see openbox-emitter.ts) and need no flush.
 
 const FROZEN_REQUIRED_KEYS = [
   "source",
@@ -39,6 +47,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       userInput: { content: "Hi", role: "user" },
       workflowId: "thread-A"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -59,6 +68,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       signalName: "agent_output",
       workflowId: "thread-B"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -80,6 +90,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       toolOrigin: "copilotkit-observed",
       workflowId: "thread-C"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -107,6 +118,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       toolName: "setThemeColor",
       workflowId: "thread-C"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -128,6 +140,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       runId: "run-D",
       workflowId: "thread-D"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -144,6 +157,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       runId: "run-E",
       workflowId: "thread-E"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -190,6 +204,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       threadId: "thread-F",
       workflowId: "thread-F"
     });
+    await flushMacrotask();
 
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalled();
@@ -212,6 +227,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       signalName: "user_input",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.signal_args).toEqual(["what is the weather in tokyo?"]);
@@ -227,6 +243,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       signalName: "user_input",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.signal_args).toEqual({ value: "hello" });
@@ -242,6 +259,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       threadId: "thread-X",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.multi_agent_session_id).toBe("mas:run-X");
@@ -256,6 +274,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       threadId: "thread-X",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload).not.toHaveProperty("multi_agent_session_id");
@@ -272,6 +291,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       runId: "run-X",
       workflowId: "child-wf"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.multi_agent_session_id).toBe("mas:run-X");

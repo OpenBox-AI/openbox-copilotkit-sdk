@@ -156,7 +156,11 @@ export async function wrapCopilotRuntimeOptions<
   extras: WrapCopilotRuntimeOptionsExtras = {}
 ): Promise<WrapCopilotRuntimeOptionsResult<TOptions>> {
   const logger = extras.logger ?? DEFAULT_LOGGER;
-  const { runtime, runContext, shutdown } = buildBaseRuntime(configInput, { logger });
+  const telemetryOptions = extras.middlewareOptions?.telemetry;
+  const { runtime, runContext, telemetryQueue, shutdown } = buildBaseRuntime(configInput, {
+    logger,
+    ...(telemetryOptions !== undefined ? { telemetry: telemetryOptions } : {})
+  });
 
   if (extras.validateApiKeyAtStartup) {
     await runtime.client.validateApiKey();
@@ -165,6 +169,7 @@ export async function wrapCopilotRuntimeOptions<
   const controller: OpenBoxRuntimeController = {
     runtime,
     runContext,
+    telemetryQueue,
     defaults: extras.defaults ?? {},
     logger,
     serverToolOwnership: new ServerToolOwnershipRegistry()
