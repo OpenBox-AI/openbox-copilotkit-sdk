@@ -4,6 +4,9 @@
     "ApprovalExpiredError",
     "ApprovalPendingError",
     "ApprovalRejectedError",
+    "CopilotKitGovernanceControlError",
+    "CopilotKitServerToolCorrelationError",
+    "CopilotKitUnsupportedVerdictError",
     "DEFAULT_MAX_PER_WORKFLOW",
     "DEFAULT_TTL_MS",
     "ENFORCEMENT_OWNER",
@@ -41,6 +44,7 @@
     "attachAuditEnvelope",
     "buildAgentIdentityCanonicalRequest",
     "createAgentIdentityHeaders",
+    "createOpenBoxCopilotKit",
     "createOpenBoxMiddleware",
     "getOpenBoxConfig",
     "idempotencyKey",
@@ -68,6 +72,10 @@
     "validateUrlSecurity"
   ],
   "./copilotkit": [
+    "CopilotKitGovernanceControlError",
+    "CopilotKitServerToolCorrelationError",
+    "CopilotKitUnsupportedVerdictError",
+    "createOpenBoxCopilotKit",
     "createOpenBoxMiddleware",
     "withOpenBoxRuntime"
   ],

@@ -22,7 +22,7 @@ import {
   buildConformanceRuntime,
   FakeCore
 } from "@openbox-ai/openbox-sdk-ts/conformance";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, type Mock } from "vitest";
 
 import { GOVERNANCE_BLOCKED_ERROR_CODE } from "../../src/copilotkit/governance-blocked-error.js";
 import { createOpenBoxMiddleware } from "../../src/copilotkit/openbox-middleware.js";
@@ -84,7 +84,7 @@ function hasToolCallEnd(events: BaseEvent[]): boolean {
 
 async function runEnforcedToolCall(
   runtime: ReturnType<typeof buildConformanceRuntime>
-): Promise<{ events: BaseEvent[]; logger: { warn: ReturnType<typeof vi.fn> } }> {
+): Promise<{ events: BaseEvent[]; logger: { warn: Mock } }> {
   const { controller, logger } = buildController({ runtime });
   const middleware = createOpenBoxMiddleware(controller, {
     enforceApprovals: true,

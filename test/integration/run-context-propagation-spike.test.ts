@@ -59,7 +59,7 @@ function toolCallStream(toolCallId: string): LanguageModelV3StreamPart[] {
 function makeProbeAgent(
   controller: OpenBoxRuntimeController,
   toolCallId: string,
-  sink: { observed?: { workflowId: string; runId: string } }
+  sink: { observed?: { workflowId: string; runId: string } | undefined }
 ): BuiltInAgent {
   const tool = defineTool({
     description: "Records the OpenBox per-run context observed inside execute.",

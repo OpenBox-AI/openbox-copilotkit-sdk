@@ -83,6 +83,13 @@ interface ToolCallBufferEntry {
   activityStarted: boolean;
   args: string;
   argsDeltas: ToolCallArgsEventLike[];
+  // RT-F4: present ONLY for a frontend+enforce call. Accumulates the raw
+  // TOOL_CALL_START/ARGS/END events so they can be forwarded together once
+  // the verdict resolves (or discarded entirely on block) — never forwarded
+  // as they stream in, unlike an observed/telemetry call. Cleared (one-shot
+  // flush, explicit `undefined` — not omission — hence the `| undefined`)
+  // once `resolveForwardEvents` returns them.
+  bufferedEvents?: BaseEvent[] | undefined;
   completed: boolean;
   endTime?: number;
   frontend: boolean;
@@ -133,7 +140,12 @@ export class OpenBoxMiddleware extends Middleware {
   // Ed25519 seed is parsed once per child.
   readonly #childClientCache = new Map<string, OpenBoxClient>();
   readonly #emitter: OpenBoxCopilotKitEmitter;
-  readonly #enforceApprovals: boolean;
+  // Governs ONLY the frontend AG-UI TOOL_CALL_END gate (renamed from the
+  // deprecated `enforceApprovals` boolean's field name — that boolean is now
+  // one of several inputs `resolveFrontendEnforcement` resolves into this
+  // flag; server-tool enforcement is an entirely separate boundary, see
+  // `server-tool.ts`).
+  readonly #frontendEnforce: boolean;
   readonly #frontendToolNames: string[] | undefined;
   readonly #isFrontendTool:
     | ((call: { name: string }) => boolean)
@@ -155,7 +167,21 @@ export class OpenBoxMiddleware extends Middleware {
     this.#runtime = runtime;
     this.#logger = runtime.logger;
     this.#emitter = new OpenBoxCopilotKitEmitter(runtime, opts.onEvent, opts.redactPaths);
-    this.#enforceApprovals = opts.enforceApprovals === true;
+    this.#frontendEnforce = resolveFrontendEnforcement(opts);
+    // Deprecation warning fires ONLY when the deprecated boolean is the
+    // DECIDING input (the caller has not set the explicit replacement) — an
+    // operator who already migrated to `enforcement.frontendTools` should
+    // never see noise about the boolean they are no longer relying on.
+    if (opts.enforceApprovals === true && opts.enforcement?.frontendTools === undefined) {
+      this.#logger.warn?.({
+        note:
+          "openbox middleware: `enforceApprovals: true` is deprecated (removed in 1.0.0) and now " +
+          "enforces ONLY the frontend AG-UI TOOL_CALL_END gate. Server tools are NOT covered by this " +
+          "flag — wrap them explicitly via `bundle.serverTool()` (see OpenBoxEnforcementOptions). " +
+          "Set `middlewareOptions.enforcement.frontendTools` to silence this warning.",
+        reason: "deprecated_enforce_approvals"
+      });
+    }
     this.#frontendToolNames = opts.frontendToolNames;
     this.#isFrontendTool = opts.isFrontendTool;
     this.#redactPaths = opts.redactPaths;
@@ -259,7 +285,16 @@ export class OpenBoxMiddleware extends Middleware {
                 }
 
                 if (!blocked) {
-                  subscriber.next(event);
+                  // RT-F4: a frontend+enforce call's TOOL_CALL_START/ARGS/END
+                  // triple is buffered (see `ToolCallBufferEntry.bufferedEvents`)
+                  // rather than forwarded as it streams in — `resolveForwardEvents`
+                  // returns `[]` while buffering, or the FULL held sequence once
+                  // the verdict resolves as allow (a block already returned above
+                  // via `blockResult`, discarding the buffer entirely). Every
+                  // other event forwards unchanged (single-element array).
+                  for (const forwardEvent of resolveForwardEvents(state, event)) {
+                    subscriber.next(forwardEvent);
+                  }
                 }
               });
             },
@@ -386,10 +421,17 @@ export class OpenBoxMiddleware extends Middleware {
           toolCallName: string;
         };
         const frontend = this.#isFrontend({ name: toolCall.toolCallName });
+        // RT-F4: a frontend call under frontend-enforce buffers its own
+        // START/ARGS/END triple (see `bufferedEvents` below) instead of
+        // forwarding as it streams — holding only END (the pre-Phase-5
+        // behavior) would already have let the browser act on fully-streamed
+        // args before the verdict resolved.
+        const bufferBeforeVerdict = frontend && this.#frontendEnforce;
         state.toolCallBuffer.set(toolCall.toolCallId, {
           activityStarted: false,
           args: "",
           argsDeltas: [],
+          ...(bufferBeforeVerdict ? { bufferedEvents: [event] } : {}),
           completed: false,
           frontend,
           startTime: Date.now(),
@@ -410,6 +452,7 @@ export class OpenBoxMiddleware extends Middleware {
             delta: argsEvent.delta,
             toolCallId: argsEvent.toolCallId
           });
+          entry.bufferedEvents?.push(event);
         }
         return undefined;
       }
@@ -422,6 +465,33 @@ export class OpenBoxMiddleware extends Middleware {
         }
         entry.activityArgs = parseToolArgs(entry.args);
         entry.endTime = Date.now();
+        // Append END to the buffer BEFORE gating so a subsequent allow-path
+        // flush (`resolveForwardEvents`, called by the caller once this
+        // returns `undefined`) forwards the complete START/ARGS*/END sequence.
+        entry.bufferedEvents?.push(event);
+
+        if (!entry.frontend) {
+          // RT-F15: a server (non-frontend) tool call MIGHT be claimed by a
+          // `bundle.serverTool()` wrapper, but the AI SDK enqueues the
+          // tool-call notification (leading to this very TOOL_CALL_END)
+          // BEFORE it ever invokes the tool's real `execute` (verified: `ai`
+          // package's own `executeToolCall`, fire-and-forget, a handful of
+          // microtask-only `await`s deep — no timers/IO in between). Checking
+          // ownership immediately here would race the wrapper's claim and
+          // reliably LOSE. Yielding to the MACROTASK queue once — not a fixed
+          // race-prone delay, but a structural guarantee that every currently
+          // queued microtask (including that whole invoke-execute chain) has
+          // already run by the time this resumes — gives the wrapper's
+          // synchronous claim (the first line of its actual `execute`) time
+          // to land before the ownership check below. A ScriptedAgent-driven
+          // (non-wrapped) call has no such chain to wait for, so this is a
+          // negligible one-tick delay for it — `isOwned` still correctly
+          // resolves false and this proceeds exactly as before (preserves
+          // e.g. the interrupt-tracking test's "ActivityStarted fires at
+          // TOOL_CALL_END" expectation for an unwrapped call).
+          await yieldToMacrotaskQueue();
+        }
+
         const blockResult = await this.#emitActivityStartedIfNeeded({
           activityId: endEvent.toolCallId,
           agentId,
@@ -729,6 +799,14 @@ export class OpenBoxMiddleware extends Middleware {
    * `interruptStore.clearRun` is SKIPPED when `keepInterrupts` is set — an
    * interrupt outcome persists fresh entries in this SAME call, and a later
    * resume run must still be able to `take()` them back.
+   * `serverToolOwnership.releaseRun` (RT-F15) bulk-releases every
+   * `bundle.serverTool()` ownership claim made during this run — the wrapper
+   * deliberately does NOT self-release real (non-generated) correlation per
+   * call (see `server-tool.ts`'s release-site comment: doing so would race
+   * this middleware's own deferred TOOL_CALL_RESULT/flush ownership check
+   * and lose every time), so this run-terminal sweep is the ONE place those
+   * claims are guaranteed to be cleaned up, called AFTER every flush path
+   * above has already had its chance to observe them.
    */
   #clearRunOnTerminal(
     state: PerRunState,
@@ -738,6 +816,7 @@ export class OpenBoxMiddleware extends Middleware {
     if (!opts.keepInterrupts) {
       this.#runtime.interruptStore.clearRun(state.runId);
     }
+    this.#runtime.serverToolOwnership.releaseRun(state.runId);
   }
 
   /**
@@ -812,6 +891,20 @@ export class OpenBoxMiddleware extends Middleware {
       return undefined;
     }
 
+    // RT-F15 duplicate-suppression: a wrapped server tool
+    // (`bundle.serverTool()`) already claimed `(runId, toolCallId)` ownership
+    // and emitted its OWN ActivityStarted/Completed for this call (Phase 5).
+    // Suppress BOTH halves of the observer's emission — `entry.completed =
+    // true` short-circuits the later `#emitActivityCompleted` call via its
+    // own `if (entry.completed) return;` guard — while the raw AG-UI event
+    // keeps flowing to the client unchanged (this method never touches event
+    // forwarding). Keyed on the tuple, NEVER on tool name (RT-F5/RT-F15).
+    if (this.#runtime.serverToolOwnership.isOwned(state.runId, activityId)) {
+      entry.activityStarted = true;
+      entry.completed = true;
+      return undefined;
+    }
+
     const activityStartedInput: ActivityStartedInput = {
       activityArgs: entry.activityArgs,
       activityId,
@@ -826,10 +919,11 @@ export class OpenBoxMiddleware extends Middleware {
       workflowId: state.workflowId
     };
 
-    if (this.#enforceApprovals) {
-      // Phase 5: buffer the frontend TOOL_CALL_START/ARGS/END triple (hold
-      // delivery until the verdict resolves, not END-only) — deferred; this
-      // phase only fixes WHEN/HOW the verdict is awaited, still at END.
+    if (this.#frontendEnforce) {
+      // RT-F4: the caller (`#processStream`'s `next` handler, via
+      // `resolveForwardEvents`) buffers this call's TOOL_CALL_START/ARGS/END
+      // triple and only forwards it once this resolves as allow — never
+      // forwarded as it streams in, unlike telemetry/observed calls.
       const enforced = await this.#emitActivityStartedEnforced(activityStartedInput);
       entry.activityStarted = true;
       entry.lastVerdict = enforced.verdict;
@@ -1337,6 +1431,17 @@ function extractUserText(message: unknown): unknown {
 }
 
 /**
+ * Resolve once every currently-queued MICROTASK has run (a macrotask/timer
+ * callback is ordered strictly after the ENTIRE microtask queue drains,
+ * regardless of how many hops deep it is) — used at TOOL_CALL_END (RT-F15)
+ * to let a `bundle.serverTool()` wrapper's own microtask-only "invoke
+ * execute" chain finish before checking `serverToolOwnership.isOwned`.
+ */
+function yieldToMacrotaskQueue(): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, 0));
+}
+
+/**
  * The legacy child client only understands `fail_open`/`fail_closed`. The
  * base config's `fail_closed_destructive` is unreachable through this SDK's
  * own config input type (which never offers that value) — degrade it to the
@@ -1344,6 +1449,75 @@ function extractUserText(message: unknown): unknown {
  */
 function toLegacyApiErrorPolicy(policy: OnApiError): "fail_open" | "fail_closed" {
   return policy === "fail_open" ? "fail_open" : "fail_closed";
+}
+
+/**
+ * Resolve the frontend AG-UI `TOOL_CALL_END` gate's observe/enforce flag from
+ * the explicit `OpenBoxEnforcementOptions` model, falling back to the
+ * deprecated `enforceApprovals` boolean, per the precedence documented on
+ * `OpenBoxMiddlewareOptions.enforceApprovals`:
+ *
+ *   1. `enforcement.frontendTools` explicit — wins outright.
+ *   2. `enforceApprovals === true` (deprecated) — frontend-only enforcement.
+ *   3. `enforcement.mode === "enforce"` — `frontendTools` follows `mode`.
+ *   4. Otherwise observe (telemetry default).
+ */
+function resolveFrontendEnforcement(opts: OpenBoxMiddlewareOptions): boolean {
+  const explicit = opts.enforcement?.frontendTools;
+  if (explicit === "enforce") {
+    return true;
+  }
+  if (explicit === "observe") {
+    return false;
+  }
+  if (opts.enforceApprovals === true) {
+    return true;
+  }
+  return opts.enforcement?.mode === "enforce";
+}
+
+/**
+ * RT-F4: decide what to forward downstream for one event. Only
+ * TOOL_CALL_START/ARGS/END belonging to a buffering call (frontend+enforce,
+ * see `bufferBeforeVerdict` at TOOL_CALL_START) are held — every other event
+ * forwards unchanged (`[event]`), matching the pre-Phase-5 behavior exactly.
+ *
+ * - START/ARGS while still buffering → `[]` (held; already appended to
+ *   `entry.bufferedEvents` by the caller in `#handleEvent`).
+ * - END while buffering → the FULL accumulated sequence, flushed once (a
+ *   block never reaches here: `#handleEvent` already returned the redacted
+ *   frame directly, so the buffer is simply discarded with `state` — never
+ *   forwarded).
+ */
+function resolveForwardEvents(state: PerRunState, event: BaseEvent): BaseEvent[] {
+  const toolCallId = bufferableToolCallId(event);
+  if (!toolCallId) {
+    return [event];
+  }
+  const entry = state.toolCallBuffer.get(toolCallId);
+  if (!entry?.bufferedEvents) {
+    return [event];
+  }
+  if (event.type !== EventType.TOOL_CALL_END) {
+    return [];
+  }
+  const buffered = entry.bufferedEvents;
+  entry.bufferedEvents = undefined;
+  return buffered;
+}
+
+/** `toolCallId` for the 3 buffer-relevant event types only; `undefined` for everything else (incl. TOOL_CALL_RESULT). */
+function bufferableToolCallId(event: BaseEvent): string | undefined {
+  switch (event.type) {
+    case EventType.TOOL_CALL_START:
+    case EventType.TOOL_CALL_ARGS:
+    case EventType.TOOL_CALL_END: {
+      const withId = event as BaseEvent & { toolCallId?: string };
+      return withId.toolCallId;
+    }
+    default:
+      return undefined;
+  }
 }
 
 function parseToolArgs(raw: string): unknown {
@@ -1402,7 +1576,11 @@ const PROCEEDABLE_VERDICTS: ReadonlySet<Verdict> = new Set([
   Verdict.REQUIRE_APPROVAL
 ]);
 
-function isProceedableVerdict(verdict: Verdict): boolean {
+// Exported: `server-tool.ts`'s enforce-mode gate reuses this same allow-list
+// (its own CONSTRAIN/unsupported-verdict check) rather than redefining it —
+// one definition of "proceed" shared by the frontend gate and the
+// server-tool wrapper.
+export function isProceedableVerdict(verdict: Verdict): boolean {
   return PROCEEDABLE_VERDICTS.has(verdict);
 }
 
@@ -1410,9 +1588,10 @@ function isProceedableVerdict(verdict: Verdict): boolean {
  * Best-effort correlation id off a base `EvaluationResult` — same fallback
  * shape the pre-migration `resolveCorrelationId` used (`governanceEventId` ??
  * `approvalId` ?? `"unknown"`). Used for the ONE case this gate can inspect a
- * full result before failing it: CONSTRAIN (D5).
+ * full result before failing it: CONSTRAIN (D5). Exported for `server-tool.ts`'s
+ * matching CONSTRAIN check (DRY — same fallback shape, not redefined).
  */
-function correlationIdFromResult(result: EvaluationResult): string {
+export function correlationIdFromResult(result: EvaluationResult): string {
   return result.governanceEventId ?? result.approvalId ?? "unknown";
 }
 
@@ -1445,8 +1624,14 @@ function resolveEnforcementCorrelationId(err: unknown): string {
  * network failure, or any other unexpected throw) maps to `"evaluation_error"`
  * — the enforcement boundary fails CLOSED on every path through this
  * function, never converting an error into an allow.
+ *
+ * Exported: `server-tool.ts`'s wrapper reuses this SAME translation for its
+ * own `evaluateLifecycle()` catch — one mapping from base error to
+ * `CopilotKitGovernanceControlError.reason` shared by both enforcement
+ * boundaries (frontend gate + wrapped server tool), so an operator's
+ * `err.reason` handling does not depend on which boundary blocked the call.
  */
-function toGovernanceControlError(err: unknown): CopilotKitGovernanceControlError {
+export function toGovernanceControlError(err: unknown): CopilotKitGovernanceControlError {
   if (err instanceof CopilotKitUnsupportedVerdictError) {
     return new CopilotKitGovernanceControlError("unsupported_verdict", err.message, {
       cause: err
