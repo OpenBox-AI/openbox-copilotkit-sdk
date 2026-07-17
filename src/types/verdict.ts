@@ -1,67 +1,40 @@
-const VERDICT_VALUES = {
-  ALLOW: "allow",
-  CONSTRAIN: "constrain",
-  REQUIRE_APPROVAL: "require_approval",
-  BLOCK: "block",
-  HALT: "halt"
-} as const;
+import {
+  Verdict as BaseVerdictValues,
+  highestPriorityVerdict,
+  verdictFromString,
+  verdictPriority,
+  verdictRequiresApproval,
+  verdictShouldStop,
+  type Verdict as BaseVerdict
+} from "@openbox-ai/openbox-sdk-ts";
 
-export type Verdict = (typeof VERDICT_VALUES)[keyof typeof VERDICT_VALUES];
-
-const VERDICT_PRIORITIES: Record<Verdict, number> = {
-  [VERDICT_VALUES.ALLOW]: 1,
-  [VERDICT_VALUES.CONSTRAIN]: 2,
-  [VERDICT_VALUES.REQUIRE_APPROVAL]: 3,
-  [VERDICT_VALUES.BLOCK]: 4,
-  [VERDICT_VALUES.HALT]: 5
-};
-
-function isVerdict(value: string): value is Verdict {
-  return (Object.values(VERDICT_VALUES) as string[]).includes(value);
-}
+/**
+ * Verdict values are byte-identical to base's `Verdict` (`contracts/results.js`)
+ * — verified: `allow` | `constrain` | `require_approval` | `block` | `halt`,
+ * same priority ordering. Base exposes the VALUES and the priority/parse
+ * helpers as separate top-level functions rather than attached to the value
+ * object, so this package's historical method-bearing `Verdict.fromString(...)`
+ * / `.priorityOf(...)` / `.highestPriority(...)` / `.shouldStop(...)` /
+ * `.requiresApproval(...)` public shape is preserved here as a thin wrapper —
+ * every method below delegates to base's own logic (no local re-implementation).
+ */
+export type Verdict = BaseVerdict;
 
 export const Verdict = Object.freeze({
-  ...VERDICT_VALUES,
+  ...BaseVerdictValues,
   fromString(value?: string | null): Verdict {
-    if (!value) {
-      return VERDICT_VALUES.ALLOW;
-    }
-
-    const normalized = value.toLowerCase().replaceAll("-", "_");
-
-    if (normalized === "continue") {
-      return VERDICT_VALUES.ALLOW;
-    }
-
-    if (normalized === "stop") {
-      return VERDICT_VALUES.HALT;
-    }
-
-    if (
-      normalized === "require_approval" ||
-      normalized === "request_approval"
-    ) {
-      return VERDICT_VALUES.REQUIRE_APPROVAL;
-    }
-
-    return isVerdict(normalized) ? normalized : VERDICT_VALUES.ALLOW;
+    return verdictFromString(value);
   },
   highestPriority(verdicts: Verdict[]): Verdict {
-    return verdicts.reduce<Verdict>(
-      (highest, verdict) =>
-        VERDICT_PRIORITIES[verdict] > VERDICT_PRIORITIES[highest]
-          ? verdict
-          : highest,
-      VERDICT_VALUES.ALLOW
-    );
+    return highestPriorityVerdict(verdicts);
   },
   priorityOf(verdict: Verdict): number {
-    return VERDICT_PRIORITIES[verdict];
+    return verdictPriority(verdict);
   },
   requiresApproval(verdict: Verdict): boolean {
-    return verdict === VERDICT_VALUES.REQUIRE_APPROVAL;
+    return verdictRequiresApproval(verdict);
   },
   shouldStop(verdict: Verdict): boolean {
-    return verdict === VERDICT_VALUES.BLOCK || verdict === VERDICT_VALUES.HALT;
+    return verdictShouldStop(verdict);
   }
 });

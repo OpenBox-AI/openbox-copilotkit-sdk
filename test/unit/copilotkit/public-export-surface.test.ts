@@ -12,6 +12,9 @@ import * as identityPublic from "../../../src/identity/index.js";
 import * as rootPublic from "../../../src/index.js";
 import * as typesPublic from "../../../src/types/index.js";
 
+import { OpenBoxClient } from "../../../src/client/index.js";
+import { parseOpenBoxConfig } from "../../../src/config/index.js";
+
 const REQUIRED_FRAMEWORK_EXPORTS = [
   "createOpenBoxMiddleware",
   "withOpenBoxRuntime"
@@ -114,6 +117,70 @@ describe("src/index.ts root public surface", () => {
         expect(Symbol.keyFor(value)).not.toBe("openbox.copilotkit.runtime");
       }
     }
+  });
+});
+
+/**
+ * Signature-level facade compatibility (RT-F6). Name presence alone (the
+ * FREEZE snapshot below) does not prove a facade preserves the OLD
+ * constructor/function SHAPE — base's own `OpenBoxClient` ctor is positional
+ * with private fields and base has no `parseOpenBoxConfig` at all, so a naive
+ * re-export would keep the NAME but break every existing call site. These
+ * assertions construct/call the facades via their historical shapes and read
+ * back historical public fields, proving the shim — not just the name —
+ * survived the phase-06 thinning.
+ */
+describe("facade signature-level compatibility (RT-F6)", () => {
+  it("./client: OpenBoxClient is still constructed via the old OBJECT shape with old public fields", () => {
+    const client = new OpenBoxClient({
+      agentDid: undefined,
+      agentPrivateKey: undefined,
+      apiKey: "obx_test_facade_signature_check",
+      apiUrl: "https://api.openbox.ai/",
+      evaluateMaxRetries: 3,
+      evaluateRetryBaseDelayMs: 25,
+      onApiError: "fail_closed",
+      timeoutSeconds: 12
+    });
+
+    // Old PUBLIC FIELD surface (not private, not accessor-only) — a
+    // constructor-compatible shim, not a positional-ctor re-export.
+    expect(client.apiUrl).toBe("https://api.openbox.ai");
+    expect(client.apiKey).toBe("obx_test_facade_signature_check");
+    expect(client.evaluateMaxRetries).toBe(3);
+    expect(client.evaluateRetryBaseDelayMs).toBe(25);
+    expect(client.onApiError).toBe("fail_closed");
+    expect(client.timeoutSeconds).toBe(12);
+    expect(client.agentDid).toBeUndefined();
+    expect(client.agentPrivateKey).toBeUndefined();
+    expect(typeof client.evaluate).toBe("function");
+    expect(typeof client.pollApproval).toBe("function");
+    expect(typeof client.validateApiKey).toBe("function");
+  });
+
+  it("./config: parseOpenBoxConfig still accepts the old flat input shape and returns the old flat config shape", () => {
+    const config = parseOpenBoxConfig(
+      {
+        apiKey: "obx_live_facade_signature_check",
+        apiUrl: "https://api.openbox.ai",
+        evaluateMaxRetries: 5,
+        governanceTimeout: 45,
+        hitlEnabled: false,
+        skipWorkflowTypes: ["wfA"]
+      },
+      {}
+    );
+
+    expect(config.apiUrl).toBe("https://api.openbox.ai");
+    expect(config.apiKey).toBe("obx_live_facade_signature_check");
+    expect(config.evaluateMaxRetries).toBe(5);
+    expect(config.governanceTimeout).toBe(45);
+    expect(config.hitlEnabled).toBe(false);
+    expect(config.skipWorkflowTypes).toEqual(new Set(["wfA"]));
+    // Fields untouched by this call still resolve to the documented defaults
+    // — proving the translator, not just the touched fields, is wired.
+    expect(config.onApiError).toBe("fail_open");
+    expect(config.validate).toBe(true);
   });
 });
 
