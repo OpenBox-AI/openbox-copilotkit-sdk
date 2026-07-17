@@ -1,4 +1,16 @@
-import type { ApplierGateway } from "../verdict/applier-context.js";
+/**
+ * Gateway tag identifying the boundary that observed or enforced a verdict.
+ * (Relocated here from the removed `src/verdict/*` surface — RT-F7; the audit
+ * envelope is its only remaining consumer.)
+ */
+export type ApplierGateway =
+  | "agui_event"
+  | "frontend"
+  | "llm"
+  | "mcp"
+  | "runtime"
+  | "server_tool"
+  | "sub_agent_report";
 
 import { idempotencyKey } from "./idempotency-key.js";
 

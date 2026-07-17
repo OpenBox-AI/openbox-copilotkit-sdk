@@ -6,4 +6,3 @@ export * from "./governance/index.js";
 export * from "./identity/index.js";
 export * from "./spans/index.js";
 export * from "./types/index.js";
-export * from "./verdict/index.js";
