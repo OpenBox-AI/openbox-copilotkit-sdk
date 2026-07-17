@@ -1,19 +1,22 @@
 import { CoreAdapter } from "@openbox-ai/openbox-sdk-ts/adapters";
 import { ApprovalPoller } from "@openbox-ai/openbox-sdk-ts/approvals";
 import { type ClientLogger, OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
-import { defaultHitlConfig, OpenBoxConfig } from "@openbox-ai/openbox-sdk-ts/config";
 import { ContextStore } from "@openbox-ai/openbox-sdk-ts/context";
 import { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 
 import type { OpenBoxConfigInput } from "../../config/openbox-config.js";
-import { SDK_METADATA } from "../../sdk-metadata.js";
 import { LifecycleTelemetryQueue, type TelemetryQueueOptions } from "../lifecycle-telemetry.js";
 import type { OpenBoxLogger } from "../types.js";
 
 import { ChildAgentClientCache } from "./child-agent-client-cache.js";
+import { resolveCopilotKitBaseConfig, resolveTelemetryQueueOptions } from "./config-translator.js";
+import {
+  installCopilotKitInstrumentation,
+  type OpenBoxInstrumentationController,
+  type OpenBoxInstrumentationOptions
+} from "./instrumentation.js";
 import { RunContextStore } from "./run-context-store.js";
 
-const ENV_PREFIX = "OPENBOX_COPILOTKIT";
 // Finite default so a HITL wait cannot pin a governed operation forever;
 // explicit `null` (via `opts.approvalMaxWaitMs`) opts into an infinite wait.
 const DEFAULT_APPROVAL_MAX_WAIT_MS = 900_000;
@@ -24,6 +27,8 @@ export interface BuildBaseRuntimeOptions {
   approvalMaxWaitMs?: number | null;
   /** Bounded, non-blocking telemetry-queue configuration (Phase 3, fixes B4). */
   telemetry?: TelemetryQueueOptions;
+  /** Opt-in base instrumentation (Phase 6). OFF by default -- see `config-translator.ts`'s `instrumentation.enabled` resolution. */
+  instrumentation?: OpenBoxInstrumentationOptions;
 }
 
 export interface BaseRuntimeBundle {
@@ -36,6 +41,13 @@ export interface BaseRuntimeBundle {
    * (multi-agent Handoff, RT-F10) — see `shutdown`'s drain-before-close order.
    */
   childAgentClients: ChildAgentClientCache;
+  /**
+   * Present only when `instrumentation.enabled` resolved `true` (OFF by
+   * default in `0.4.0`) — `undefined` means nothing was ever patched, never a
+   * controller sitting idle. See `shutdown`'s drain-before-close order for
+   * where `flush()`/`shutdown()` are called.
+   */
+  instrumentation?: OpenBoxInstrumentationController;
   /** Idempotent — safe to call more than once; later calls resolve the first call's promise. */
   shutdown: () => Promise<void>;
 }
@@ -55,7 +67,7 @@ export function buildBaseRuntime(
   configInput: OpenBoxConfigInput,
   opts: BuildBaseRuntimeOptions = {}
 ): BaseRuntimeBundle {
-  const config = resolveBaseConfig(configInput);
+  const config = resolveCopilotKitBaseConfig(configInput, opts.instrumentation, opts.logger);
   const clientLogger = toClientLogger(opts.logger);
 
   const client = new OpenBoxClient(config.apiUrl, config.apiKey, {
@@ -119,11 +131,25 @@ export function buildBaseRuntime(
   // (Phase 3, fixes B4) — constructed once here so `maxConcurrentSends`/
   // `maxPendingEvents` bound resource use across every run this controller
   // serves, never per-middleware-instance (see `types.ts`'s
-  // `OpenBoxMiddlewareOptions.telemetry` doc).
+  // `OpenBoxMiddlewareOptions.telemetry` doc). The deprecated
+  // `maxEvaluatePayloadBytes` alias (Phase 6) is folded in as a
+  // `maxPayloadBytes` fallback only when `opts.telemetry` doesn't already set it.
   const telemetryQueue = new LifecycleTelemetryQueue(
     { client, ...(opts.logger ? { logger: opts.logger } : {}) },
-    opts.telemetry
+    resolveTelemetryQueueOptions(configInput, opts.telemetry, opts.logger)
   );
+
+  // Opt-in base instrumentation (Phase 6, OFF by default in 0.4.0):
+  // `config.instrumentation.enabled` is the SINGLE source of truth (resolved
+  // by `resolveCopilotKitBaseConfig` above from `opts.instrumentation?.enabled`)
+  // — `initOpenBoxInstrumentation` is never even CALLED when it is `false`, so
+  // no target is patched and no process-wide instrumentation slot is claimed
+  // (root-import purity: merely importing `instrumentation.ts` registers
+  // nothing; only this conditional call can).
+  const instrumentationController: OpenBoxInstrumentationController | undefined =
+    config.instrumentation.enabled
+      ? installCopilotKitInstrumentation(runtime, opts.instrumentation ?? {}, clientLogger)
+      : undefined;
 
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
@@ -138,7 +164,10 @@ export function buildBaseRuntime(
         //   3. drain the bounded telemetry queue (Phase 3) — bounded by
         //      `flushTimeoutMs`; the queue itself reports+diagnoses any count
         //      still pending after the timeout, never blocking shutdown.
-        //   4. flush instrumentation + restore patched globals (Phase 6 stub)
+        //   4. flush + shut down instrumentation (Phase 6) — drains detached
+        //      completed-telemetry (sync-fs, node:http/https) THEN restores
+        //      every patched global; a no-op when instrumentation was never
+        //      installed (`instrumentationController` is `undefined`).
         //   5. await every in-flight Handoff emission, then drop every cached
         //      child client (RT-F10) — never let the process exit mid
         //      signing-or-send.
@@ -146,7 +175,10 @@ export function buildBaseRuntime(
         childAgentClients.beginShutdown();
         shutdownController.abort();
         await telemetryQueue.flush();
-        // Phase 6: flush instrumentation + restore any patched globals.
+        if (instrumentationController) {
+          await instrumentationController.flush();
+          instrumentationController.shutdown();
+        }
         await childAgentClients.close();
         runtime.close();
       })();
@@ -154,41 +186,14 @@ export function buildBaseRuntime(
     return shutdownPromise;
   };
 
-  return { childAgentClients, runContext, runtime, shutdown, telemetryQueue };
-}
-
-/**
- * Translate the CopilotKit-facing config input into a
- * `OpenBoxConfig.resolve()` call. Only the fields this SDK's public config
- * input can express today are translated (`apiUrl`, `apiKey`, `agentDid`,
- * `agentPrivateKey`, `governanceTimeout`→`timeoutSeconds`, `onApiError`,
- * `hitlEnabled`→`hitl.enabled`); the remaining legacy fields
- * (`evaluateMaxRetries`, `skipWorkflowTypes`, ...) get their full alias
- * translation in Phase 6.
- */
-function resolveBaseConfig(configInput: OpenBoxConfigInput): OpenBoxConfig {
-  // The base SDK's own env fallback reads `OPENBOX_API_URL`; this SDK's
-  // documented env var is `OPENBOX_URL` — translate explicitly so adopters
-  // relying on the documented variable keep working unchanged.
-  const apiUrl = configInput.apiUrl ?? process.env["OPENBOX_URL"];
-
-  return OpenBoxConfig.resolve({
-    envPrefix: ENV_PREFIX,
-    sdkEngine: SDK_METADATA.engine,
-    sdkLanguage: SDK_METADATA.language,
-    sdkVersion: SDK_METADATA.version,
-    ...(apiUrl !== undefined ? { apiUrl } : {}),
-    ...(configInput.apiKey !== undefined ? { apiKey: configInput.apiKey } : {}),
-    ...(configInput.agentDid !== undefined ? { agentDid: configInput.agentDid } : {}),
-    ...(configInput.agentPrivateKey !== undefined
-      ? { agentPrivateKey: configInput.agentPrivateKey }
-      : {}),
-    ...(configInput.governanceTimeout !== undefined
-      ? { timeoutSeconds: configInput.governanceTimeout }
-      : {}),
-    ...(configInput.onApiError !== undefined ? { onApiError: configInput.onApiError } : {}),
-    hitl: { ...defaultHitlConfig(), enabled: configInput.hitlEnabled ?? true }
-  });
+  return {
+    childAgentClients,
+    runContext,
+    runtime,
+    shutdown,
+    telemetryQueue,
+    ...(instrumentationController !== undefined ? { instrumentation: instrumentationController } : {})
+  };
 }
 
 /**

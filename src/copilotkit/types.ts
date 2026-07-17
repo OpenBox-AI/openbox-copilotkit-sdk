@@ -3,6 +3,7 @@ import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 import type { SpanBuffer } from "../spans/span-buffer.js";
 
 import type { ChildAgentClientCache } from "./internal/child-agent-client-cache.js";
+import type { OpenBoxInstrumentationOptions } from "./internal/instrumentation.js";
 import type { InterruptPersistencePort } from "./internal/interrupt-store.js";
 import type { RunContextStore } from "./internal/run-context-store.js";
 import type { RunTerminalStateRegistry } from "./internal/run-terminal-state.js";
@@ -176,10 +177,20 @@ export interface OpenBoxMiddlewareOptions {
    * builds this controller's `telemetryQueue` (see `internal/base-runtime-builder.ts`);
    * the queue is a single instance shared by every run this controller
    * serves, so a later `createOpenBoxMiddleware` call on the SAME controller
-   * cannot reconfigure it. Full deprecated-alias mapping (e.g. the removed
-   * `maxEvaluatePayloadBytes`) is deferred to Phase 6.
+   * cannot reconfigure it. The deprecated `maxEvaluatePayloadBytes` config
+   * field (Phase 6) maps onto `maxPayloadBytes` here as a fallback only when
+   * this option doesn't already set it — see `internal/config-translator.ts`.
    */
   telemetry?: TelemetryQueueOptions;
+  /**
+   * Opt-in base instrumentation (Phase 6, proposal §14) — OFF by default in
+   * `0.4.0`; no target (fetch/http/https/fs/db) is ever patched unless
+   * `enabled: true` is set here. Read ONCE, same construction-time semantics
+   * as `telemetry` above (see `internal/base-runtime-builder.ts`). Shutdown
+   * always calls the installed controller's `flush()` then `shutdown()`
+   * before the runtime closes, restoring every patched global.
+   */
+  instrumentation?: OpenBoxInstrumentationOptions;
 }
 
 /**

@@ -166,11 +166,13 @@ export async function wrapCopilotRuntimeOptions<
 ): Promise<WrapCopilotRuntimeOptionsResult<TOptions>> {
   const logger = extras.logger ?? DEFAULT_LOGGER;
   const telemetryOptions = extras.middlewareOptions?.telemetry;
+  const instrumentationOptions = extras.middlewareOptions?.instrumentation;
   const { runtime, runContext, telemetryQueue, childAgentClients, shutdown } = buildBaseRuntime(
     configInput,
     {
       logger,
-      ...(telemetryOptions !== undefined ? { telemetry: telemetryOptions } : {})
+      ...(telemetryOptions !== undefined ? { telemetry: telemetryOptions } : {}),
+      ...(instrumentationOptions !== undefined ? { instrumentation: instrumentationOptions } : {})
     }
   );
 

@@ -199,6 +199,62 @@ describe("buildBaseRuntime", () => {
     await built.shutdown();
   });
 
+  describe("instrumentation (Phase 6) — opt-in, OFF by default", () => {
+    it("is off by default: no controller on the bundle, base initOpenBoxInstrumentation never called, no global patched", () => {
+      const fetchBefore = globalThis.fetch;
+
+      const built = buildBaseRuntime(CONFIG);
+
+      expect(built.instrumentation).toBeUndefined();
+      expect(globalThis.fetch).toBe(fetchBefore);
+    });
+
+    it("installs when instrumentation.enabled is true, and shutdown flushes + shuts it down between the telemetry drain and childAgentClients.close() (Phase 6 teardown order)", async () => {
+      const built = buildBaseRuntime(CONFIG, { instrumentation: { enabled: true } });
+      expect(built.instrumentation).toBeDefined();
+      const instrumentation = built.instrumentation!;
+
+      const order: string[] = [];
+      vi.spyOn(built.telemetryQueue, "flush").mockImplementation(async () => {
+        order.push("telemetry-flush");
+        return { notFlushed: 0 };
+      });
+      // Call THROUGH to the real flush/shutdown (never replaced) so the
+      // globals this test's construction actually patched (fetch/http/https/
+      // fs/function) are genuinely restored — a fully-mocked implementation
+      // here would leak a patched `globalThis.fetch` into every later test in
+      // this file.
+      const realFlush = instrumentation.flush.bind(instrumentation);
+      const instrumentationFlushSpy = vi.spyOn(instrumentation, "flush").mockImplementation(async () => {
+        order.push("instrumentation-flush");
+        return realFlush();
+      });
+      const realShutdown = instrumentation.shutdown.bind(instrumentation);
+      const instrumentationShutdownSpy = vi.spyOn(instrumentation, "shutdown").mockImplementation(() => {
+        order.push("instrumentation-shutdown");
+        return realShutdown();
+      });
+      vi.spyOn(built.childAgentClients, "close").mockImplementation(async () => {
+        order.push("close-children");
+      });
+      vi.spyOn(built.runtime, "close").mockImplementation(() => {
+        order.push("close-runtime");
+      });
+
+      await built.shutdown();
+
+      expect(instrumentationFlushSpy).toHaveBeenCalledTimes(1);
+      expect(instrumentationShutdownSpy).toHaveBeenCalledTimes(1);
+      expect(order).toEqual([
+        "telemetry-flush",
+        "instrumentation-flush",
+        "instrumentation-shutdown",
+        "close-children",
+        "close-runtime"
+      ]);
+    });
+  });
+
   describe("module import — global purity", () => {
     it("does not mutate globalThis.fetch", async () => {
       const fetchBefore = globalThis.fetch;
