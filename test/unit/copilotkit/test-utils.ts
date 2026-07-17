@@ -4,9 +4,11 @@ import {
   type BaseEvent,
   type RunAgentInput
 } from "@ag-ui/client";
+import { CoreAdapter } from "@openbox-ai/openbox-sdk-ts/adapters";
 import type { OpenBoxClient as BaseOpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+import { OpenBoxConfig } from "@openbox-ai/openbox-sdk-ts/config";
 import { ContextStore } from "@openbox-ai/openbox-sdk-ts/context";
-import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
+import { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 import { EMPTY, Observable } from "rxjs";
 import { vi, type Mock } from "vitest";
 
@@ -75,6 +77,16 @@ export class ScriptedAgent extends AbstractAgent {
 export interface BuildControllerOptions {
   evaluateMock?: Mock;
   pollApprovalMock?: Mock;
+  /**
+   * Pre-built base `OpenBoxRuntime` to use instead of the default stand-in
+   * (e.g. `buildConformanceRuntime` wired to a `FakeCore` + a real
+   * `ApprovalPoller`, for approval-wait tests — see
+   * `test/integration/copilotkit-approval-wait.test.ts`). When provided,
+   * `evaluateMock`/`pollApprovalMock` are still built (so the return shape is
+   * unchanged) but are NOT wired to this runtime — they back only the
+   * telemetry queue's legacy client, unrelated to `evaluateLifecycle`.
+   */
+  runtime?: OpenBoxRuntime;
 }
 
 export interface BuiltController {
@@ -84,34 +96,46 @@ export interface BuiltController {
   pollApprovalMock: Mock;
 }
 
+// Fixed, valid base config for the stand-in runtime (Phase 4b needs a REAL
+// `OpenBoxRuntime` so `evaluateLifecycle` is a genuine method — see
+// `buildRuntimeStandIn` below). `OpenBoxConfig.resolve` validates `apiUrl`
+// (HTTPS or localhost) and `apiKey` (`obx_(live|test)_*`) eagerly, so this
+// must be a value that actually passes, not the free-form strings the old
+// plain-object stand-in used.
+const STAND_IN_BASE_CONFIG = OpenBoxConfig.resolve({
+  apiKey: "obx_test_copilotkit_middleware",
+  apiUrl: "https://core.test"
+});
+
 /**
- * Minimal stand-in for the base `OpenBoxRuntime`. Tests exercise the
- * middleware/emitter with the SAME legacy adapter-owned mock `OpenBoxClient`
- * they always have — only its shape is now nested under `.runtime.client` to
- * match the real `OpenBoxRuntimeController`. `.config` carries just the
- * fields `openbox-middleware.ts` reads off the resolved base config (parent
- * DID fallback + legacy child-client construction); the stand-in is cast (not
- * a real `OpenBoxRuntime`) because unit tests never need the base runtime's
- * other behavior (`evaluateLifecycle`/`preflight`/`completed`/`.adapter`).
+ * Real base `OpenBoxRuntime` (not a cast plain object — Phase 4b's enforce
+ * gate calls its GENUINE `evaluateLifecycle` method, which a duck-typed
+ * stand-in cannot provide). Tests exercise the middleware/emitter with the
+ * SAME legacy adapter-owned mock `OpenBoxClient` they always have; only the
+ * `client:` property needs an inner cast (this legacy client has a different
+ * `evaluate` signature than the base `OpenBoxClient` type `OpenBoxRuntime`
+ * expects — `evaluateLifecycle` only ever calls its single `.evaluate(...)`
+ * method, so the cast is safe for every existing test, none of which drive
+ * REQUIRE_APPROVAL through this stand-in).
  *
- * `contextStore` is a REAL base `ContextStore` (not a further mock/cast) —
- * `openbox-middleware.ts`'s RUN_FINISHED/RUN_ERROR terminal cleanup
- * (RT-F14) calls `controller.runtime.contextStore.clearHalt(...)`
- * unconditionally, so every test that drives a terminal event through the
- * middleware needs a working `contextStore`, not just tests that assert on
- * halt behavior directly.
+ * `adapter: new CoreAdapter()` (no poller) matches the pre-4b default: a
+ * REQUIRE_APPROVAL verdict fails safe (rejected), and no existing test drives
+ * that verdict through this stand-in — approval-wait coverage uses the base
+ * `conformance` kit's `buildConformanceRuntime` instead (passed via
+ * `options.runtime`).
+ *
+ * `contextStore` is a REAL base `ContextStore` — `openbox-middleware.ts`'s
+ * RUN_FINISHED/RUN_ERROR terminal cleanup (RT-F14) calls
+ * `controller.runtime.contextStore.clearHalt(...)` unconditionally, so every
+ * test that drives a terminal event through the middleware needs a working
+ * `contextStore`, not just tests that assert on halt behavior directly.
  */
 function buildRuntimeStandIn(client: OpenBoxClient): OpenBoxRuntime {
-  return {
-    client,
-    config: {
-      agentDid: null,
-      apiUrl: "http://test.invalid",
-      onApiError: "fail_open",
-      timeoutSeconds: 1
-    },
+  return new OpenBoxRuntime(STAND_IN_BASE_CONFIG, {
+    client: client as unknown as BaseOpenBoxClient,
+    adapter: new CoreAdapter(),
     contextStore: new ContextStore()
-  } as unknown as OpenBoxRuntime;
+  });
 }
 
 export function buildController(
@@ -144,7 +168,7 @@ export function buildController(
     logger
   });
   const controller: OpenBoxRuntimeController = {
-    runtime: buildRuntimeStandIn(client),
+    runtime: options.runtime ?? buildRuntimeStandIn(client),
     runContext: new RunContextStore(),
     telemetryQueue,
     defaults: { agentId: "test-agent", workflowType: "copilotkit" },

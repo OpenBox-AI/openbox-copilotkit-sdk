@@ -102,6 +102,44 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
     expect(payload.frontend).toBe(true);
   });
 
+  it("prepareActivityStartedForEnforcement builds the envelope + notifies onEvent WITHOUT calling evaluate (Phase 4b)", () => {
+    const onEvent = vi.fn();
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, onEvent);
+
+    const envelope = emitter.prepareActivityStartedForEnforcement({
+      activityArgs: { amount: 100 },
+      activityId: "call-enforce-1",
+      frontend: true,
+      runId: "run-G",
+      toolName: "sendPayment",
+      toolOrigin: "copilotkit-observed",
+      workflowId: "thread-G"
+    });
+
+    // Never sends/evaluates itself — the caller hands the returned envelope
+    // to `OpenBoxRuntime.evaluateLifecycle()`, the ONE place it reaches Core.
+    expect(evaluateMock).not.toHaveBeenCalled();
+
+    // The RAW envelope carries the ids `evaluateLifecycle`'s approval-poll
+    // correlation and HALT-scoping both read (`activityId` top-level,
+    // `workflow_id`/`run_id` in the flat payload).
+    expect(envelope.activityId).toBe("call-enforce-1");
+    expect(envelope.payload.workflow_id).toBe("thread-G");
+    expect(envelope.payload.run_id).toBe("run-G");
+    expect(envelope.payload.activity_input).toEqual({ amount: 100 });
+
+    // `onEvent` still fires synchronously with the PREPARED (wire-shaped)
+    // payload, for observability — same shape the other lifecycle methods use.
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    const arg = onEvent.mock.calls[0]?.[0] as {
+      eventType: string;
+      payload: Record<string, unknown>;
+    };
+    expect(arg.eventType).toBe(WorkflowEventType.ACTIVITY_STARTED);
+    expect(arg.payload.activity_id).toBe("call-enforce-1");
+  });
+
   it("emitActivityCompleted includes status, duration_ms, start_time, end_time", async () => {
     const { controller, evaluateMock } = buildController();
     const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);

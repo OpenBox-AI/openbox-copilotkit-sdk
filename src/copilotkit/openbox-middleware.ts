@@ -6,6 +6,15 @@ import {
   type RunAgentInput,
   type RunFinishedEvent
 } from "@ag-ui/client";
+import {
+  ApprovalExpiredError,
+  ApprovalRejectedError,
+  ApprovalTimeoutError,
+  GovernanceBlockedError,
+  GovernanceHaltError,
+  Verdict,
+  type EvaluationResult
+} from "@openbox-ai/openbox-sdk-ts";
 import type { OnApiError } from "@openbox-ai/openbox-sdk-ts/config";
 import { Observable } from "rxjs";
 
@@ -20,13 +29,14 @@ import {
 } from "../spans/tool-span-synthesizer.js";
 import { OpenBoxConfigError } from "../types/errors.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
-import { Verdict } from "../types/verdict.js";
 
 import {
   createGovernanceBlockedErrorEvent,
   type GovernanceBlockedErrorEvent
 } from "./governance-blocked-error.js";
+import { CopilotKitGovernanceControlError } from "./governance-control-error.js";
 import { DEFAULT_INTERRUPT_TTL_MS, type PendingInterrupt } from "./internal/interrupt-store.js";
+import type { ActivityStartedInput } from "./lifecycle-events.js";
 import {
   AGENT_OUTPUT_SIGNAL_NAME,
   COPILOTKIT_TASK_QUEUE,
@@ -49,6 +59,7 @@ import type {
   OpenBoxRuntimeController,
   OpenBoxSubagentHandoffConfig
 } from "./types.js";
+import { CopilotKitUnsupportedVerdictError } from "./unsupported-verdict-error.js";
 
 const TOOL_ORIGIN = "copilotkit-observed";
 const TOOL_CALL_RESULT_EVENT_TYPE = "TOOL_CALL_RESULT";
@@ -800,35 +811,107 @@ export class OpenBoxMiddleware extends Middleware {
     if (entry.activityStarted) {
       return undefined;
     }
-    // Phase 4/5: buffer frontend-enforce triple (hold TOOL_CALL_START/ARGS/END
-    // together until the verdict resolves, not END-only) — deferred; the
-    // enforcing gate below is unchanged from before this phase.
-    const verdict = await this.#emitter.emitActivityStarted(
-      {
-        activityArgs: entry.activityArgs,
-        activityId,
-        agentId,
-        frontend: entry.frontend,
-        goal,
-        metadata,
-        multiAgentSessionId: state.multiAgentSessionId,
-        runId: state.runId,
-        toolName: entry.toolName,
-        toolOrigin: TOOL_ORIGIN,
-        workflowId: state.workflowId
-      },
-      { enforce: this.#enforceApprovals }
-    );
+
+    const activityStartedInput: ActivityStartedInput = {
+      activityArgs: entry.activityArgs,
+      activityId,
+      agentId,
+      frontend: entry.frontend,
+      goal,
+      metadata,
+      multiAgentSessionId: state.multiAgentSessionId,
+      runId: state.runId,
+      toolName: entry.toolName,
+      toolOrigin: TOOL_ORIGIN,
+      workflowId: state.workflowId
+    };
+
+    if (this.#enforceApprovals) {
+      // Phase 5: buffer the frontend TOOL_CALL_START/ARGS/END triple (hold
+      // delivery until the verdict resolves, not END-only) — deferred; this
+      // phase only fixes WHEN/HOW the verdict is awaited, still at END.
+      const enforced = await this.#emitActivityStartedEnforced(activityStartedInput);
+      entry.activityStarted = true;
+      entry.lastVerdict = enforced.verdict;
+      if (enforced.blockEvent) {
+        return enforced.blockEvent;
+      }
+      // A blocked delegation never hands off; the Handoff is emitted only after a
+      // non-blocking parent ActivityStarted, mirroring the expected sequence
+      // (parent ActivityStarted → child Handoff → child WorkflowStarted).
+      await this.#maybeEmitHandoff({ activityId, entry, state });
+      return undefined;
+    }
+
+    // Telemetry-only mode (unchanged): enqueue and never block.
+    const verdict = await this.#emitter.emitActivityStarted(activityStartedInput);
     entry.activityStarted = true;
     entry.lastVerdict = verdict;
-    if (this.#enforceApprovals && shouldBlock(verdict)) {
-      return createGovernanceBlockedErrorEvent(resolveCorrelationId(verdict));
-    }
-    // A blocked delegation never hands off; the Handoff is emitted only after a
-    // non-blocking parent ActivityStarted, mirroring the expected sequence
-    // (parent ActivityStarted → child Handoff → child WorkflowStarted).
     await this.#maybeEmitHandoff({ activityId, entry, state });
     return undefined;
+  }
+
+  /**
+   * The enforcing pre-execution gate (fixes B2). Builds the ActivityStarted
+   * envelope + fires `onEvent` for observability (both pure, no send — see
+   * `prepareActivityStartedForEnforcement`), then routes the ACTUAL send
+   * through the base `OpenBoxRuntime.evaluateLifecycle()`: gate-prep +
+   * `client.evaluate` + REQUIRE_APPROVAL wait (`waitForDecision`, via the
+   * Phase-2 poller) + BLOCK/HALT raise all happen INSIDE that one call — this
+   * method never enqueues on the telemetry queue and never calls
+   * `client.evaluate` a second time (no double-send).
+   *
+   * `evaluateLifecycle` only returns normally for ALLOW, or for
+   * REQUIRE_APPROVAL that resolved as APPROVED (the returned `result.verdict`
+   * is left as `"require_approval"` in that case — `handleApproval` resolving
+   * without throwing is what "approved" means, per the base runtime). Reject/
+   * expire/timeout/BLOCK/HALT all THROW a base error before returning. CONSTRAIN
+   * is the one verdict the adapter has no action for and also returns
+   * normally (D5) — so it is the only "returned normally" case this method
+   * must itself reject, by throwing `CopilotKitUnsupportedVerdictError`
+   * BEFORE any delivery/handoff.
+   *
+   * Every throw path (base control errors, the unsupported-verdict error, and
+   * any OTHER exception — auth/signing/contract/network) is caught here and
+   * translated to the SAME redacted `governance_blocked` frame: this gate is
+   * pre-delivery, so any failure to reach a definite ALLOW must fail CLOSED,
+   * never a silent allow.
+   */
+  async #emitActivityStartedEnforced(
+    input: ActivityStartedInput
+  ): Promise<{
+    blockEvent: GovernanceBlockedErrorEvent | undefined;
+    verdict: GovernanceVerdictResponse | null;
+  }> {
+    const envelope = this.#emitter.prepareActivityStartedForEnforcement(input);
+    try {
+      const result = await this.#runtime.runtime.evaluateLifecycle(envelope);
+      if (!isProceedableVerdict(result.verdict)) {
+        throw new CopilotKitUnsupportedVerdictError(
+          result.verdict,
+          correlationIdFromResult(result)
+        );
+      }
+      // Bridge to this SDK's local `GovernanceVerdictResponse` shape (span/audit
+      // `policyVersion` reads `policyId` off it): every field this SDK reads
+      // off a verdict (`verdict`, `reason`, `policyId`, `governanceEventId`,
+      // `approvalId`, ...) is named identically on both shapes, so the cast is
+      // safe — mirrors the same bridge `openbox-emitter.ts#evaluate` already
+      // documents and relies on.
+      return { blockEvent: undefined, verdict: result as unknown as GovernanceVerdictResponse };
+    } catch (err) {
+      const controlError = toGovernanceControlError(err);
+      this.#logger.warn?.({
+        err: controlError,
+        note: "openbox enforce gate: tool call blocked at the CopilotKit boundary",
+        reason: controlError.reason,
+        workflow_id: input.workflowId
+      });
+      return {
+        blockEvent: createGovernanceBlockedErrorEvent(resolveEnforcementCorrelationId(err)),
+        verdict: null
+      };
+    }
   }
 
   async #emitActivityCompleted({
@@ -1303,15 +1386,93 @@ function parseMaybeJsonString(value: unknown): unknown {
   }
 }
 
-function shouldBlock(verdict: GovernanceVerdictResponse | null): boolean {
-  if (!verdict) {
-    return false;
-  }
-  return Verdict.shouldStop(verdict.verdict);
+/**
+ * Verdicts `evaluateLifecycle()` can return WITHOUT throwing that mean
+ * "proceed": ALLOW, and REQUIRE_APPROVAL that resolved as approved (its
+ * `result.verdict` is left as `"require_approval"` — `handleApproval`
+ * resolving instead of throwing is what "approved" means). BLOCK/HALT never
+ * reach this check (they always throw first); CONSTRAIN reaches it and is
+ * deliberately NOT in this set (D5 — the adapter has no enforcement action
+ * for it, so the caller must reject it explicitly). Written as an allow-list
+ * (not `!== CONSTRAIN`) so a hypothetical future verdict the base SDK adds
+ * fails closed here by default, not open.
+ */
+const PROCEEDABLE_VERDICTS: ReadonlySet<Verdict> = new Set([
+  Verdict.ALLOW,
+  Verdict.REQUIRE_APPROVAL
+]);
+
+function isProceedableVerdict(verdict: Verdict): boolean {
+  return PROCEEDABLE_VERDICTS.has(verdict);
 }
 
-function resolveCorrelationId(
-  verdict: GovernanceVerdictResponse | null
-): string {
-  return verdict?.governanceEventId ?? verdict?.approvalId ?? "unknown";
+/**
+ * Best-effort correlation id off a base `EvaluationResult` — same fallback
+ * shape the pre-migration `resolveCorrelationId` used (`governanceEventId` ??
+ * `approvalId` ?? `"unknown"`). Used for the ONE case this gate can inspect a
+ * full result before failing it: CONSTRAIN (D5).
+ */
+function correlationIdFromResult(result: EvaluationResult): string {
+  return result.governanceEventId ?? result.approvalId ?? "unknown";
+}
+
+/**
+ * Correlation id for the redacted `governance_blocked` frame when the gate
+ * caught a THROWN error rather than inspecting a returned result.
+ * `CopilotKitUnsupportedVerdictError` carries the id it was constructed with
+ * (from `correlationIdFromResult` above). Every OTHER caught error — the base
+ * `GovernanceBlockedError`/`GovernanceHaltError`/`ApprovalRejectedError`/
+ * `ApprovalExpiredError`/`ApprovalTimeoutError`, or any unrecognized
+ * exception — carries no `governanceEventId`/`approvalId` at all (verified:
+ * `openbox-sdk-ts@1.0.1` `errors/index.ts` and `adapters/base.ts` construct
+ * every one of these from a verdict/reason STRING only; `context/index.ts`'s
+ * `ContextStore` tracks boolean halt/abort flags, never the originating
+ * `EvaluationResult`) — `"unknown"` is the same fallback the pre-migration
+ * code already used for a missing id.
+ */
+function resolveEnforcementCorrelationId(err: unknown): string {
+  if (err instanceof CopilotKitUnsupportedVerdictError) {
+    return err.correlationId;
+  }
+  return "unknown";
+}
+
+/**
+ * Translate whatever `evaluateLifecycle()` (or this gate's own CONSTRAIN
+ * check) threw into a `CopilotKitGovernanceControlError`. The base control
+ * errors and `CopilotKitUnsupportedVerdictError` map to their matching
+ * reason; anything else (auth/signing rejection, `GovernanceAPIError`,
+ * network failure, or any other unexpected throw) maps to `"evaluation_error"`
+ * — the enforcement boundary fails CLOSED on every path through this
+ * function, never converting an error into an allow.
+ */
+function toGovernanceControlError(err: unknown): CopilotKitGovernanceControlError {
+  if (err instanceof CopilotKitUnsupportedVerdictError) {
+    return new CopilotKitGovernanceControlError("unsupported_verdict", err.message, {
+      cause: err
+    });
+  }
+  if (err instanceof GovernanceHaltError) {
+    return new CopilotKitGovernanceControlError("halt", err.message, { cause: err });
+  }
+  if (err instanceof GovernanceBlockedError) {
+    return new CopilotKitGovernanceControlError("blocked", err.message, { cause: err });
+  }
+  if (err instanceof ApprovalRejectedError) {
+    return new CopilotKitGovernanceControlError("approval_rejected", err.message, {
+      cause: err
+    });
+  }
+  if (err instanceof ApprovalExpiredError) {
+    return new CopilotKitGovernanceControlError("approval_expired", err.message, {
+      cause: err
+    });
+  }
+  if (err instanceof ApprovalTimeoutError) {
+    return new CopilotKitGovernanceControlError("approval_timeout", err.message, {
+      cause: err
+    });
+  }
+  const message = err instanceof Error ? err.message : String(err);
+  return new CopilotKitGovernanceControlError("evaluation_error", message, { cause: err });
 }

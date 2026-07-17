@@ -1,4 +1,8 @@
-import { prepareLifecyclePayload, type JsonValue } from "@openbox-ai/openbox-sdk-ts";
+import {
+  prepareLifecyclePayload,
+  type EventEnvelope,
+  type JsonValue
+} from "@openbox-ai/openbox-sdk-ts";
 import type { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
 import { defaultPrivacyConfig, type PrivacyConfig } from "@openbox-ai/openbox-sdk-ts/config";
 
@@ -79,20 +83,24 @@ export interface HandoffEmitInput {
  * lifecycle/signal methods below build a base `EventEnvelope` via
  * `lifecycle-events.ts` and run it through the base strict gate
  * (`prepareLifecyclePayload`) — no hand-built snake_case object remains for
- * those six. Five of them are PURE TELEMETRY (post-operation, observation
- * only): they enqueue the prepared payload on the bounded, non-blocking
- * `LifecycleTelemetryQueue` (Phase 3, fixes B4) and return immediately —
- * `onEvent` fires with the exact payload on QUEUE ACCEPTANCE, never gated on
- * Core. `emitActivityStarted` is the exception: it is the ENFORCING
- * pre-execution gate for a frontend-tool call — in `{ enforce: true }` mode it
- * still awaits `client.evaluate` directly and returns the verdict (used by
- * the middleware's `shouldBlock` check); otherwise it enqueues like the other
- * five and returns `null`. `emitActivityCompletedHook` (hook-span) and
- * `emitHandoff` still hand-assemble their payload via
- * `withBaseEnvelope`/`toWireSpan` and always evaluate directly (migration
- * deferred — see each method's own note; explicitly out of scope for Phase
- * 3b). Emitter/queue failures are logged and swallowed so telemetry can never
- * break the user stream.
+ * those six. All six (including `emitActivityStarted`) are PURE TELEMETRY
+ * (post-operation, observation only): they enqueue the prepared payload on
+ * the bounded, non-blocking `LifecycleTelemetryQueue` (Phase 3, fixes B4) and
+ * return immediately — `onEvent` fires with the exact payload on QUEUE
+ * ACCEPTANCE, never gated on Core.
+ *
+ * Enforcement (Phase 4b) no longer lives here: the frontend `TOOL_CALL_END`
+ * gate (`openbox-middleware.ts`) builds its OWN ActivityStarted envelope via
+ * `prepareActivityStartedForEnforcement` below (redact + build + notify
+ * `onEvent`, no send) and awaits the base `OpenBoxRuntime.evaluateLifecycle()`
+ * directly — that is the ONE place an enforced ActivityStarted reaches Core,
+ * so it must never ALSO be enqueued here (no double-send).
+ *
+ * `emitActivityCompletedHook` (hook-span) and `emitHandoff` still hand-
+ * assemble their payload via `withBaseEnvelope`/`toWireSpan` and always
+ * evaluate directly (migration deferred — see each method's own note;
+ * explicitly out of scope for Phase 3b). Emitter/queue failures are logged
+ * and swallowed so telemetry can never break the user stream.
  */
 export class OpenBoxCopilotKitEmitter {
   readonly #client: OpenBoxClient;
@@ -177,17 +185,13 @@ export class OpenBoxCopilotKitEmitter {
   }
 
   /**
-   * The enforcing pre-execution gate for a frontend-tool call. `opts.enforce`
-   * (set by the middleware from its own `enforceApprovals` flag) selects the
-   * path: `true` awaits `client.evaluate` directly and returns the verdict so
-   * the caller can block; otherwise (the default, telemetry-only mode) this
-   * enqueues like the other five lifecycle methods and returns `null` —
-   * NEVER applying a blocking verdict to a call the middleware isn't holding
-   * for approval.
+   * Pure telemetry, same shape as the other five: enqueue on the bounded,
+   * non-blocking queue and return immediately. Never used for enforcement —
+   * see `prepareActivityStartedForEnforcement` below for the enforce-mode
+   * path (Phase 4b), which bypasses this method (and the queue) entirely.
    */
-  public async emitActivityStarted(
-    input: ActivityStartedInput,
-    opts: { enforce?: boolean } = {}
+  public emitActivityStarted(
+    input: ActivityStartedInput
   ): Promise<GovernanceVerdictResponse | null> {
     const boundedInput: ActivityStartedInput = {
       ...input,
@@ -204,12 +208,40 @@ export class OpenBoxCopilotKitEmitter {
       workflowId: input.workflowId
     };
 
-    if (opts.enforce) {
-      return this.#evaluate(payload, emissionMeta);
-    }
-
     this.#enqueueTelemetry(payload, emissionMeta, input.runId, false);
-    return null;
+    return Promise.resolve(null);
+  }
+
+  /**
+   * Enforce-mode-only (Phase 4b, fixes B2): build + redact the ActivityStarted
+   * envelope exactly like `emitActivityStarted` above, notify `onEvent` with
+   * the prepared (wire-shaped) payload for observability, and return the RAW
+   * `EventEnvelope` for the caller to hand to
+   * `OpenBoxRuntime.evaluateLifecycle()` — which re-prepares the payload
+   * internally (against the base runtime's own resolved config) before the
+   * real send. This method never sends/evaluates itself and never enqueues
+   * on the telemetry queue: `evaluateLifecycle` is the ONE place an enforced
+   * ActivityStarted reaches Core (no double-send).
+   */
+  public prepareActivityStartedForEnforcement(
+    input: ActivityStartedInput
+  ): EventEnvelope {
+    const boundedInput: ActivityStartedInput = {
+      ...input,
+      ...(input.activityArgs !== undefined
+        ? { activityArgs: this.#redactAndBound(input.activityArgs) }
+        : {})
+    };
+    const envelope = buildActivityStartedEnvelope(boundedInput);
+    const { payload } = prepareLifecyclePayload(envelope, { privacy: this.#privacy });
+
+    this.#notifyObserver(payload, {
+      activityId: input.activityId,
+      eventType: WorkflowEventType.ACTIVITY_STARTED,
+      workflowId: input.workflowId
+    });
+
+    return envelope;
   }
 
   public emitActivityCompleted(
