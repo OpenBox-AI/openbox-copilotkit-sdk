@@ -1,8 +1,10 @@
 # Project Roadmap
 
-**Last Updated**: 2026-06-30
-**Current Version**: 0.3.0
-**Stable Release Target**: 0.5.0 (Q3 2026 estimate)
+**Last Updated**: 2026-07-17
+**Current Version**: 0.4.0
+**Stable Release Target**: 1.0.0 (removes deprecated facades/aliases; no committed date)
+
+> **Note on this roadmap's 0.4.0/0.5.0 sections below.** The `0.2.0`/`0.3.0` entries are an accurate historical record. The `0.4.0`/`0.5.0` **plans** that follow them were written before the actual `0.4.0` work started and describe a "constrain applier first, then approval+halt" sequencing that is **not what shipped**. The real `0.4.0` (delivered via the `openbox-sdk-ts` adoption migration — see [`MIGRATION.md`](../MIGRATION.md)) ships real `REQUIRE_APPROVAL` waiting and HALT/BLOCK enforcement, explicit `serverTool()` pre-execution governance, and truthful interrupt semantics — and explicitly **excludes** CONSTRAIN (unsupported, typed failure, no committed ship date), reversing the original sequencing. The corrected status is called out inline below; the surrounding provisional requirement checklists are left as the historical planning record.
 
 ## Version History
 
@@ -107,9 +109,25 @@
 
 ---
 
-## Roadmap: 0.4.0 (Sep–Oct 2026)
+## Roadmap: 0.4.0 (shipped 2026-07-17) — corrected
 
-### Phase 3a: Constrain Verdict Applier
+> **This is what actually shipped**, superseding the "Phase 3a: Constrain Verdict Applier" plan below (kept underneath, struck from the release, as the historical planning record).
+
+**Scope (actual)**: Adopt `@openbox-ai/openbox-sdk-ts` as the base runtime (full migration); correct four lifecycle defects (false universal server-tool gate, approval verdict that never waited, interrupt reported as success, telemetry that serially blocked the stream); ship `createOpenBoxCopilotKit`/`serverTool()` explicit server-tool governance; exclude CONSTRAIN (unsupported, documented, no committed ship date — reverses the plan below, which assumed constrain would ship first).
+
+**Delivered**:
+- [x] `REQUIRE_APPROVAL` verdict — real waiting via the base `ApprovalPoller` (`waitForDecision`), not deferred to `0.5.0`
+- [x] `HALT`/`BLOCK` — enforced at both the frontend delivery gate and, for wrapped tools, `serverTool()`'s pre-execution gate
+- [x] `CONSTRAIN` — explicit `CopilotKitUnsupportedVerdictError` at the enforcing boundaries; **not** implemented, no committed ship date (reverses this section's original plan below)
+- [x] Truthful interrupt/resume semantics (typed failure on resume-with-no-pending, injectable non-durable persistence port)
+- [x] Non-blocking bounded telemetry queue
+- [x] `src/verdict/*` public exports removed (breaking change — never wired into real enforcement)
+- [ ] Full CONSTRAIN rewrite (tool-arg interception/modification pre-execution) — deferred, no target release yet
+
+<details>
+<summary>Original plan for this section (not what shipped — kept for history)</summary>
+
+### Phase 3a: Constrain Verdict Applier (superseded)
 
 **Scope**: Implement `constrain` verdict enforcement; rewrite tool args/constraints.
 
@@ -122,11 +140,18 @@
 
 **Release**: 0.4.0-beta.0 (constrain only; require_approval/halt deferred to 0.5.0)
 
+</details>
+
 ---
 
-## Roadmap: 0.5.0 (Oct–Nov 2026)
+## Roadmap: 0.5.0 — scope TBD
 
-### Phase 3b: Approval & Halt Verdicts
+> `REQUIRE_APPROVAL` (HITL polling) and `HALT` shipped in `0.4.0` (above), not here — the "Phase 3b" plan below is superseded. `0.5.0`'s actual scope has not been planned yet; likely candidates are the full CONSTRAIN rewrite and interrupt-persistence hardening, but neither is committed.
+
+<details>
+<summary>Original plan for this section (not what shipped — kept for history)</summary>
+
+### Phase 3b: Approval & Halt Verdicts (superseded — shipped in 0.4.0 instead)
 
 **Scope**: Implement `require_approval` (HITL polling) + `halt` (stop workflow).
 
@@ -140,6 +165,8 @@
 - Retry polling logic; exponential backoff in adopter's hands
 
 **Release**: 0.5.0-beta.0
+
+</details>
 
 ---
 
@@ -206,13 +233,13 @@
 
 ## Metrics & Success Criteria (By Release)
 
-| Metric | 0.2.0 | 0.3.0 | 0.4.0 | 0.5.0 | Notes |
-|--------|-------|-----------|-------|-------|-------|
-| **Verdict applier coverage** | 2/5 (allow, block) | 2/5 | 3/5 (+ constrain) | 5/5 (+ approval, halt) | Deferred phases |
-| **Span synthesis** | Foundation only | ✓ + audit envelope | ✓ + transport | ✓ | Phase 2 → 2b |
-| **Test coverage (lines)** | ≥60% | ≥65% | ≥70% | ≥75% | Phase 3 pushes coverage up |
-| **Adopter latency (P50)** | <50ms (target) | <50ms | <100ms (approval poll async) | <100ms | Approval polling async; no blocking |
-| **Multi-agent support** | Basic dedup | Dedup + context propagation | Constrain context passing | Approval context | Incremental richness |
+| Metric | 0.2.0 | 0.3.0 | 0.4.0 (actual) | Notes |
+|--------|-------|-----------|-------|-------|
+| **Verdict enforcement coverage** | 2/5 (allow, block — frontend-observed only) | 2/5 (unchanged; verdict/* module added but never wired) | 4/5 (allow, block, halt, require_approval — real waiting; per-boundary, not one applier) | `constrain` is the one unsupported case — explicit typed failure, no committed date |
+| **Span synthesis** | Foundation only | ✓ + audit envelope + transport | ✓ (unchanged) | — |
+| **Test coverage (lines)** | ≥60% | ≥65% | see `docs/code-standards.md` thresholds | Coverage thresholds did not change as part of this migration |
+| **Server-tool pre-execution enforcement** | none | none | ✓ via `bundle.serverTool()` | New in `0.4.0` — the first boundary with an execution-time guarantee |
+| **Multi-agent support** | Basic dedup | Dedup + context propagation | Base `handoff()` factory; `copilotkit:` session prefix | Handoff payload simplified to the two Core-required fields (D1) |
 
 ---
 
@@ -220,11 +247,13 @@
 
 ```
 Jun 2026:  0.2.0-beta.0 shipped (OTel removed)
-Jun 2026:  0.3.0 shipped (verdict routing + span synthesis)
-Sep 2026:  0.4.0-beta.0 (constrain applier)
-Oct 2026:  0.5.0-beta.0 (approval + halt)
-Nov 2026:  0.5.0 stable release (MVP complete)
-2027:      Companion packages (React HITL, v1 helpers, etc.)
+Jun 2026:  0.3.0 shipped (verdict routing + span synthesis, never wired into enforcement)
+Jul 2026:  0.4.0 shipped (base-SDK adoption; serverTool() pre-execution governance;
+                          real require_approval waiting; halt/block enforced;
+                          constrain explicitly unsupported)
+TBD:       0.5.0 scope not yet planned
+TBD:       1.0.0 — removes deprecated facades/config aliases; API stability
+2027+:     Companion packages (React HITL, v1 helpers, etc.) — unscheduled
 ```
 
 ---
@@ -242,13 +271,22 @@ Nov 2026:  0.5.0 stable release (MVP complete)
 
 ## Known Limitations & Constraints
 
-### Phase 1–2 Constraints
+### Current (as of 0.4.0) Constraints
+
+1. **CONSTRAIN is unsupported**: raises a typed `CopilotKitUnsupportedVerdictError` at the enforcing boundaries rather than being applied; no committed ship date for full support (reverses the original Phase 1–2 plan below, which assumed `allow`+`block` only and `constrain` shipping before `require_approval`/`halt` — in reality `require_approval`/`halt` shipped in `0.4.0` and `constrain` did not).
+2. **Interrupt persistence is non-durable by default**: the bundled `InMemoryInterruptStore` loses pending interrupts on restart (no Core-side reaper either); operators needing durability must inject their own `InterruptPersistencePort`.
+3. **Server-tool enforcement requires explicit wrapping**: `bundle.serverTool()` must wrap a tool for pre-execution enforcement to apply to it; an unwrapped server tool, MCP tool, or external-agent call remains observation-only — there is no way to retroactively enforce a call this SDK never wrapped.
+4. **Single OpenBox endpoint**: No multi-region failover support (future architecture decision).
+5. **AsyncLocalStorage only**: Edge runtimes (Cloudflare Workers, Deno Deploy) not supported (no ALS); Node.js server only.
+
+<details>
+<summary>Original Phase 1–2 constraints (historical — superseded by 0.4.0 above)</summary>
 
 1. **Verdict enforcement limited to `allow` + `block`**: Constrain/approval/halt deferred to Phase 3 (0.4.0+); others throw clear errors.
 2. **SpanBuffer not yet shipped**: Synthesized in 0.3.0 Phase 2, but transport (Phase 2b) is opt-in in Sep 2026.
 3. **No approval persistence**: Approvals live in-memory only; restart loses pending approvals. Persistence deferred to 0.6.0+.
-4. **Single OpenBox endpoint**: No multi-region failover support (future architecture decision).
-5. **AsyncLocalStorage only**: Edge runtimes (Cloudflare Workers, Deno Deploy) not supported (no ALS); Node.js server only.
+
+</details>
 
 ### Intentional Simplifications (Not Planned to Change)
 
@@ -297,24 +335,23 @@ Nov 2026:  0.5.0 stable release (MVP complete)
 | Blocker | Status | Resolution |
 |---------|--------|------------|
 | OpenBox API `/api/v1/governance/evaluate` stability | Shipped | ✓ |
-| OpenBox API `/api/v1/governance/approval` (polling) | TBD for 0.5.0 | Needs design |
-| OpenBox API `/api/v1/spans` (transport) | TBD for Phase 2b | Needs design |
+| OpenBox API `/api/v1/governance/approval` (polling) | Shipped in 0.4.0 | ✓ — real waiting via the base `ApprovalPoller` |
+| OpenBox API `/api/v1/spans` (transport) | Shipped in 0.3.0 | ✓ |
 | CopilotKit v2 AG-UI event schema stability | Shipped | ✓ |
+| Base `@openbox-ai/openbox-sdk-ts@1.0.1` published to npm | **Not yet done** — this package still depends on `file:../openbox-sdk-ts` | Blocks the actual `npm publish` of this package; see `MIGRATION.md`'s release checklist |
 | Node.js 24.10.0+ LTS | May 2025 | Assumed stable |
 
 ---
 
-## Success Definition (0.5.0 Stable)
+## Success Definition (0.4.0 — actual)
 
 - [x] Drop-in adoption: ≤4 lines adopter code (as of 0.2.0)
-- [x] Zero-blocking default: Telemetry-default policy (as of 0.2.0)
-- [ ] 5 verdicts routable (all phases wired)
-- [ ] Spans synthesized + optional transport
-- [ ] 75%+ test coverage (lines)
-- [ ] 2–3 beta testers with positive feedback
-- [ ] No critical bugs in Phase 1–2 (approval/halt Phase 3)
-- [ ] Multi-agent dedup proven in real workflows
-- [ ] Approval TTL + polling mechanics validated
+- [x] Telemetry-default policy retained; enforcement is opt-in and per-boundary
+- [x] 4/5 verdicts enforced (allow, block, halt, require_approval); `constrain` explicitly unsupported (not a routing gap — a documented, typed failure)
+- [x] Spans synthesized + transport (shipped in 0.3.0, unchanged)
+- [x] Multi-agent handoff via the base `handoff()` factory
+- [ ] Base `@openbox-ai/openbox-sdk-ts@1.0.1` published + this package's dependency swapped from `file:` to an exact pin, then `npm publish` of `0.4.0` itself (user-owned, see `MIGRATION.md`)
+- [ ] Full CONSTRAIN support — no target release yet
 
 ---
 

@@ -23,10 +23,15 @@ const { runtime, shutdown } = await withOpenBoxRuntime(
       // Every useFrontendTool name from the React side — labels them
       // frontend: true and tool_origin: "copilotkit-observed" in OpenBox.
       frontendToolNames: ["setThemeColor"],
-      // Telemetry-default is false. Flip to true to await client.evaluate +
-      // client.pollApproval once tool-call args are complete — block/halt
-      // verdicts emit the redacted governance_blocked envelope into SSE.
+      // Deprecated boolean (use `enforcement` instead — see below). `true`
+      // enforces ONLY the frontend AG-UI delivery gate: block/halt verdicts
+      // emit the redacted governance_blocked envelope into SSE before the
+      // TOOL_CALL_* reaches the frontend. It never gates server-side tool
+      // execution — for that, wrap the tool with
+      // createOpenBoxCopilotKit(...).serverTool() instead.
       enforceApprovals: false,
+      // Equivalent, non-deprecated form:
+      // enforcement: { frontendTools: "observe" }, // "enforce" to gate delivery
     },
     // Optional shared-export config — env-var fallbacks cover the common case.
     // apiKey: process.env.OPENBOX_API_KEY,
@@ -74,6 +79,8 @@ The instance form would lose the AG-UI middleware attachment + the `before/after
 
 **Best for:** advanced operators who manage `CopilotRuntimeOptions` composition manually.
 
+> **Out of date since `0.4.0`.** `OpenBoxRuntimeController` (the first argument to `createOpenBoxMiddleware`) grew several required fields in `0.4.0` (`runtime`, `runContext`, `telemetryQueue`, `serverToolOwnership`, `interruptStore`, `runTerminalState`, `childAgentClients` — see [api-reference.md](./api-reference.md#openboxruntimecontroller)). The `{ client, defaults, logger }` object built below no longer satisfies that type. There is currently no documented supported recipe for hand-building a full controller outside `withOpenBoxRuntime`/`createOpenBoxCopilotKit`; if you need Pattern 2's manual-attach shape, treat the snippet below as illustrative of the *intent* only, and track [openbox-copilotkit-sdk#issues](https://github.com/OpenBox-AI/openbox-copilotkit-sdk/issues) for a corrected example.
+
 ```ts
 import {
   CopilotRuntime,
@@ -98,6 +105,9 @@ const client = new OpenBoxClient({
 });
 
 // 2. Build the OpenBoxRuntimeController.
+// NOTE: this object shape predates 0.4.0's richer OpenBoxRuntimeController —
+// see the callout above. `parseOpenBoxConfig`/`OpenBoxClient` above are
+// themselves deprecated facades (MIGRATION.md).
 const runtime = {
   client,
   defaults: {},
@@ -140,6 +150,26 @@ If any of those guarantees matter to you, use Pattern 1.
 | Clone-safe per-request agent isolation | **Pattern 1** |
 | Custom `CopilotRuntimeOptions` builder you don't want OpenBox to wrap | **Pattern 2** |
 | Embedded in another framework that already constructs `CopilotRuntime` | **Pattern 2** |
+| A server-side tool call must be **prevented from executing** on a BLOCK/HALT/rejected-approval verdict | `createOpenBoxCopilotKit(...).serverTool()` — see [api-reference.md](./api-reference.md#createopenboxcopilotkitoptions) |
+
+## Server-tool governance (`createOpenBoxCopilotKit`)
+
+Pattern 1 and Pattern 2 both observe the AG-UI stream — including `enforcement.frontendTools: "enforce"` (or the deprecated `enforceApprovals: true`), which only gates *delivery to the frontend*. Neither prevents a server-side tool's `execute` from running: the middleware never stands between a server-side call and its side effect. If you need that guarantee, wrap the specific tool:
+
+```ts
+import { createOpenBoxCopilotKit } from "@openbox-ai/openbox-copilotkit";
+
+const bundle = await createOpenBoxCopilotKit({
+  enforcement: { mode: "enforce" }, // gates bundle.serverTool()-wrapped tools only
+});
+
+const governedWeatherTool = bundle.serverTool(weatherTool);
+// governedWeatherTool.execute now evaluates (and, on REQUIRE_APPROVAL, awaits
+// approval for) the call BEFORE weatherTool's real execute runs. A non-allow
+// verdict (including CONSTRAIN) throws instead of running execute.
+```
+
+`enforcement.mode: "telemetry"` (the default) never gates — `execute` always runs, and the wrapper only adds best-effort ActivityStarted/Completed telemetry. See [`MIGRATION.md`](../MIGRATION.md#boundary-truthfulness--read-this-if-you-rely-on-this-sdk-for-governance) for the full three-boundary breakdown (wrapped server tool / frontend delivery gate / observation-only).
 
 ## Multi-agent delegation (Handoff)
 
@@ -264,3 +294,4 @@ parent  WorkflowCompleted        multi_agent_session_id
 - [API reference](./api-reference.md) — full signatures.
 - [Installation](./installation.md) — `next.config.ts` and `.env`.
 - [Troubleshooting](./troubleshooting.md) — the common adopter scenarios.
+- [`MIGRATION.md`](../MIGRATION.md) — the `0.4.0` boundary-truthfulness writeup and the deprecated-field alias table.

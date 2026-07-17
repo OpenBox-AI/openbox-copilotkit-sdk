@@ -93,22 +93,20 @@ If both `isFrontendTool` and `frontendToolNames` are set, the callback wins.
 
 **Symptom**
 
-You set `enforceApprovals: true`, but tool outputs that should be blocked still stream to the client.
+You set `enforceApprovals: true` (or `enforcement.frontendTools: "enforce"`), but a server-side tool's side effect still happens even though its verdict should have blocked it.
 
 **Diagnosis**
 
-This SDK enforces once a tool call's args are complete. Inside `createOpenBoxMiddleware`, the verdict is awaited before the OpenBox `ActivityStarted` record is emitted. A block/halt verdict halts the stream and emits the redacted `governance_blocked` envelope.
+`enforceApprovals`/`enforcement.frontendTools` only gate the **frontend AG-UI delivery** — inside `createOpenBoxMiddleware`, the verdict is awaited before the `TOOL_CALL_*` event reaches the frontend, and a block/halt verdict halts the stream and emits the redacted `governance_blocked` envelope. **This never gates server-side execution.** The middleware only observes the AG-UI stream; it does not stand between a server-side tool's `execute` and the side effect it performs. If the tool is a server-side tool you didn't wrap with `bundle.serverTool()`, its `execute` already ran (or is running) regardless of the verdict — see [Boundary truthfulness in MIGRATION.md](../MIGRATION.md#boundary-truthfulness--read-this-if-you-rely-on-this-sdk-for-governance).
 
-This SDK does **not** enforce in `afterRequest`. That hook runs after the SSE response has flushed, so the bytes are already on the wire and throwing there cannot produce a 5xx.
+This SDK also does **not** enforce in `afterRequest`. That hook runs after the SSE response has flushed, so the bytes are already on the wire and throwing there cannot produce a 5xx.
 
 **Fix**
 
-If you need output-side enforcement, the policy must look at the **tool input** once args are complete, not the tool output. The supported shape:
-
-- `enforceApprovals: true` blocks after the full tool-call input is known.
+- To prevent a server-side tool's `execute` from running on a non-allow verdict, wrap it with `createOpenBoxCopilotKit(...).serverTool()` and set `enforcement.mode: "enforce"`. This is the only boundary in this SDK with a pre-execution guarantee.
+- `enforceApprovals: true` / `enforcement.frontendTools: "enforce"` still has its place: it prevents a tool call from being *delivered to the frontend* once its input is known.
 - Tool output observability happens via `ActivityCompleted.activity_output` when the AG-UI stream exposes `TOOL_CALL_RESULT`. The final assistant message still emits separately as `SignalReceived(agent_output)`.
-
-Output-side enforcement is not implemented by this SDK version.
+- CONSTRAIN cannot be used to rewrite a tool call's arguments in `0.4.0` — it is explicitly unsupported (a typed `CopilotKitUnsupportedVerdictError`, never a silent allow) at both enforcing boundaries.
 
 ---
 
@@ -140,7 +138,7 @@ Use `beforeRequest.tenantFromRequest` / `beforeRequest.userFromRequest` when you
 
 **Symptom**
 
-You wired both `@openbox-ai/openbox-copilotkit` (this SDK) and `@openbox-ai/openbox-mastra-sdk` in the same demo. OpenBox dashboard shows two `workflow_type` streams (`copilotkit` and `mastra`) for every chat turn. Tool calls under `enforceApprovals: true` evaluate twice — once from each SDK.
+You wired both `@openbox-ai/openbox-copilotkit` (this SDK) and `@openbox-ai/openbox-mastra-sdk` in the same demo. OpenBox dashboard shows two `workflow_type` streams (`copilotkit` and `mastra`) for every chat turn. Tool calls evaluate twice — once from each SDK — regardless of enforcement mode (telemetry-default means every observed call is sent to Core; `enforcement`/`enforceApprovals` only control whether a non-allow verdict is acted on).
 
 **Diagnosis**
 
@@ -152,7 +150,7 @@ You wired both `@openbox-ai/openbox-copilotkit` (this SDK) and `@openbox-ai/open
 When both run in the same process:
 
 - **Duplicate `workflow_type` event streams** — accepted. Filter by `workflow_type` in the OpenBox UI to view either side independently.
-- **Double governance** — both SDKs evaluate the same tool call against `enforceApprovals`. Design your governance policies aware of this if you wire two SDKs (e.g. configure idempotent policies that don't accumulate state per-evaluation).
+- **Double governance** — both SDKs evaluate the same tool call independently. Design your governance policies aware of this if you wire two SDKs (e.g. configure idempotent policies that don't accumulate state per-evaluation).
 
 If you want a single event stream, run only one SDK. There is no co-run de-duplication feature in this package.
 

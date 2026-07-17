@@ -38,15 +38,19 @@ User Browser                  Backend
 | **Agent Proxy** | `copilotkit/internal/wrap-agent-in-proxy.ts` | Per-clone proxy intercepts `.clone()`; injects middleware |
 | **OpenBoxMiddleware** | `copilotkit/openbox-middleware.ts` | AG-UI Middleware; observes TOOL_CALL_*, RUN_*, TEXT_MESSAGE_* events |
 | **OpenBoxCopilotKitEmitter** | `copilotkit/openbox-emitter.ts` | Builds governance event payloads; emits ActivityStarted, SIGNAL_RECEIVED, ActivityCompleted, and the sibling `ActivityCompleted` hook event carrying `function_call` spans. |
-| **OpenBoxClient** | `client/openbox-client.ts` | HTTP client; calls `/api/v1/governance/evaluate`, handles retries, DID signing |
-| **Verdict Processor** | `verdict/verdict-mapper.ts`, `verdict-applier.ts` | Maps wire response → union; applies allow/block |
+| **OpenBox base runtime** | `@openbox-ai/openbox-sdk-ts` (`/runtime`, `/client`, `/adapters`, `/approvals`, `/context`) | Owns config resolution, HTTP transport + retries, DID signing, the stock `CoreAdapter` (BLOCK/HALT/REQUIRE_APPROVAL routing), and the per-runtime `ContextStore`. Composed once per controller in `copilotkit/internal/base-runtime-builder.ts`. |
+| **`createOpenBoxCopilotKit` / `serverTool()`** | `copilotkit/create-openbox-copilotkit.ts`, `copilotkit/server-tool.ts` | Bundle entry point + pre-execution wrapper: evaluates (and, in `enforce` mode, awaits approval for) a wrapped server tool's call before its real `execute` runs. |
+| **Config translator** | `copilotkit/internal/config-translator.ts` (+ `config-alias-env-resolvers.ts`, `config-nested-group-resolvers.ts`) | Resolves `OpenBoxConfigInput` (incl. every deprecated alias, warn-once) into the base SDK's `OpenBoxConfig.resolve()` call. |
+| **`OpenBoxClient` facade** *(deprecated, removed at 1.0.0)* | `client/openbox-client.ts` | Thin shim calling `/api/v1/governance/evaluate`/`/approval`/`/auth/validate` directly; delegates DID signing to base. Not used internally by `withOpenBoxRuntime`/`createOpenBoxCopilotKit` — the real path constructs the base SDK's own client. |
+| **Verdict types** | base `Verdict` / `EvaluationResult` (re-exported from the package root); `copilotkit/unsupported-verdict-error.ts` | The `src/verdict/*` mapper/applier module is **removed** (`0.4.0` breaking change). CONSTRAIN is caught at the enforcing boundaries and raised as `CopilotKitUnsupportedVerdictError`. |
 | **SpanBuffer** | `spans/span-buffer.ts` | Bounded FIFO (1000 spans, 300s TTL); stores synthesized spans |
 | **Tool Span Synthesizer** | `spans/tool-span-synthesizer.ts` | TOOL_CALL_* triple → `function_call` span with hashes, duration |
 | **Audit Envelope** | `audit/audit-envelope.ts` | Attach idempotency key, enforcement status, policy version |
-| **Agent Identity** | `identity/agent-identity.ts` | DID validation, Ed25519 signature generation, header builder |
-| **OpenBox Config** | `config/openbox-config.ts` | Parse + validate 19 env vars; provide config accessors |
-| **Governance Context** | `governance/context.ts` | AsyncLocalStorage per-request context (tenant, user, DID headers) |
-| **Approval Registry** | `governance/approval-registry.ts` | In-memory pending approvals store; poll-based retrieval |
+| **Agent Identity facade** *(deprecated, removed at 1.0.0)* | `identity/agent-identity.ts` | Re-shapes base `@openbox-ai/openbox-sdk-ts/identity` primitives (`AgentIdentity`, `buildCanonicalString`, `HEADER_*`) into this package's historical export names; no second signer. |
+| **OpenBox Config facade** *(deprecated, removed at 1.0.0)* | `config/openbox-config.ts` | Thin translator over base `OpenBoxConfig.resolve()`; not used internally by the real runtime path (see config translator above). |
+| **Governance Context** | `governance/context.ts` | AsyncLocalStorage per-request context (tenant, user, trace id) |
+| **Per-run context store** | `copilotkit/internal/run-context-store.ts` | Controller-owned store (Decision D7) supplying `workflowId`/`runId` to `serverTool()`; distinct from the base per-runtime `ContextStore`. |
+| **Interrupt persistence** | `copilotkit/internal/interrupt-store.ts` | Injectable `InterruptPersistencePort`; bundled `InMemoryInterruptStore` is explicitly non-durable. Replaces the removed in-memory `ApprovalRegistry` design — approval waiting now goes through the base SDK's `ApprovalPoller` directly, not a hand-rolled registry. |
 
 ## Request/Response Flow
 
@@ -63,7 +67,10 @@ User Browser                  Backend
    ├─→ Create CopilotRuntime with wrapped options
    │
    ├─→ Attach controller to runtime via OPENBOX_COPILOTKIT_RUNTIME_SYMBOL
-   │   (controller = { config, client, evaluator })
+   │   (controller: OpenBoxRuntimeController — owns the one base OpenBoxRuntime,
+   │    the per-run context store, the bounded telemetry queue, server-tool
+   │    ownership registry, interrupt store, run-terminal-state registry, and
+   │    the child-agent client cache; see api-reference.md#openboxruntimecontroller)
    │
    └─→ Return { runtime, shutdown } to adopter
 ```
@@ -80,10 +87,11 @@ openBoxBeforeRequest(request)
   ├─→ Open AsyncLocalStorage context
   │   └─→ Store: tenant, user, requestId
   │
-  ├─→ Build 5-header DID envelope (if OPENBOX_AGENT_DID set)
+  ├─→ Build 5-header DID envelope (if OPENBOX_AGENT_DID set) — delegates
+  │   │  canonicalization + signing to @openbox-ai/openbox-sdk-ts/identity
   │   ├─→ X-OpenBox-Agent-DID
-  │   ├─→ X-OpenBox-Timestamp (ISO 8601)
-  │   ├─→ X-OpenBox-Nonce (16-byte random, hex)
+  │   ├─→ X-OpenBox-Agent-Timestamp (ISO 8601)
+  │   ├─→ X-OpenBox-Agent-Nonce (UUID)
   │   ├─→ X-OpenBox-Body-SHA256 (empty for GET)
   │   └─→ X-OpenBox-Agent-Signature (Ed25519)
   │
@@ -112,14 +120,15 @@ OpenBoxMiddleware.run(input, next)
   │
   ├─→ Event: TOOL_CALL_RESULT / TOOL_CALL_ERROR
   │   ├─→ Complete ToolCallTriple
-  │   ├─→ Call client.evaluate(payload)
-  │   │   └─→ Governance evaluation (HTTP POST, retries, DID-signed)
-  │   ├─→ Receive GovernanceVerdictResponse
-  │   ├─→ Map verdict to OpenBoxVerdict union
-  │   ├─→ Apply verdict:
+  │   ├─→ (enforcement.frontendTools: "enforce" only) evaluateLifecycle(envelope)
+  │   │   └─→ Base OpenBoxRuntime: HTTP POST, retries, DID-signed
+  │   ├─→ Receive EvaluationResult (base Verdict)
+  │   ├─→ Route on verdict:
   │   │   ├─→ ALLOW: pass through
-  │   │   ├─→ BLOCK: inject RUN_ERROR, halt observable
-  │   │   └─→ CONSTRAIN/REQUIRE_APPROVAL/HALT: throw VerdictNotImplementedError (Phase 3)
+  │   │   ├─→ REQUIRE_APPROVAL: awaits the base ApprovalPoller before proceeding
+  │   │   ├─→ BLOCK/HALT: inject RUN_ERROR (governance_blocked), halt observable
+  │   │   └─→ CONSTRAIN: raise CopilotKitUnsupportedVerdictError (unsupported — never applied, never a silent allow)
+  │   │   (telemetry mode — the default — never awaits this gate; see "Telemetry-Default Policy" below)
   │   └─→ [Optional] Synthesize function_call span → SpanBuffer.append()
   │
   ├─→ Event: RUN_FINISHED / RUN_ERROR
@@ -221,25 +230,25 @@ openBoxAfterRequest(request, response)
 }
 ```
 
-**Mapped to** (OpenBoxVerdict discriminated union):
-```ts
-type OpenBoxVerdict =
-  | { tag: "allow"; correlationId: string }
-  | { tag: "block"; reason: string; correlationId: string }
-  | { tag: "constrain"; constraints: object; correlationId: string }
-  | { tag: "require_approval"; approvalId: string; correlationId: string }
-  | { tag: "halt"; reason: string; correlationId: string };
-```
+**Mapped to** (as of `0.4.0`): the base SDK's own `Verdict` enum and `EvaluationResult` type (`@openbox-ai/openbox-sdk-ts`, re-exported from this package's root). The `OpenBoxVerdict` discriminated union + `mapVerdict`/`applyVerdict` shown in earlier revisions of this doc were a parallel, never-wired model (`src/verdict/*`) — that module is **removed** at `0.4.0` (breaking change; see [`MIGRATION.md`](../MIGRATION.md)).
 
-**Verdict Implementation Status** (as of 0.3.0-beta.0):
+**Verdict enforcement status** (as of `0.4.0`) — enforcement is per-boundary, not a single global applier; see the boundary table below:
 
-| Verdict | Status | Target |
-|---------|--------|--------|
-| `allow` | ✓ wired | shipped |
-| `block` | ✓ wired | shipped |
-| `constrain` | audits + throws `VerdictNotImplementedError` | 0.4.0 |
-| `halt` | audits + throws `VerdictNotImplementedError` | 0.4.0 |
-| `require_approval` | audits + throws `VerdictNotImplementedError` | 0.5.0 |
+| Verdict | Status |
+|---------|--------|
+| `allow` | pass through |
+| `block` | enforced — `serverTool()` throws before `execute`; the frontend gate injects `RUN_ERROR`/`governance_blocked` |
+| `halt` | enforced — same as `block` |
+| `require_approval` | enforced — `enforce`-mode evaluation awaits the base `ApprovalPoller` (`waitForDecision`) for a real decision before proceeding |
+| `constrain` | **unsupported** — raises a typed `CopilotKitUnsupportedVerdictError` at the enforcing boundaries; never applied, never a silent allow. No committed ship date for full support. |
+
+**Enforcement boundaries** (see [`MIGRATION.md`](../MIGRATION.md#boundary-truthfulness--read-this-if-you-rely-on-this-sdk-for-governance) for the full writeup):
+
+| Boundary | Guarantee |
+|---|---|
+| `bundle.serverTool()`-wrapped server tool, `enforcement.mode: "enforce"` | Pre-execution: a non-allow verdict prevents `execute` from ever running. |
+| Explicit frontend tool, `enforcement.frontendTools: "enforce"` (or deprecated `enforceApprovals: true`) | Delivery gate: the `TOOL_CALL_END` event can be blocked before reaching the frontend. Never a server-execution guarantee. |
+| Unwrapped server tool / MCP tool / external-agent call | Observation-only. No pre-execution seam exists for a call this SDK never wrapped. |
 
 ## Cross-Cutting Concerns
 
@@ -267,37 +276,39 @@ const ctx = getOpenBoxContext();
 
 ### 2. DID-Signed HTTP Envelope
 
-**Purpose**: Prove agent identity to OpenBox API; prevent replay.
+**Purpose**: Prove agent identity to OpenBox API; prevent replay. As of `0.4.0`, canonicalization and Ed25519 signing delegate to `@openbox-ai/openbox-sdk-ts/identity` — this package generates only the nonce/timestamp values, never the crypto.
 
 **Canonical Request String**:
 ```
 METHOD
 /api/v1/governance/evaluate
 TIMESTAMP (ISO 8601)
-NONCE (16-byte random, hex)
+NONCE (UUID)
 BODY_SHA256 (empty for GET)
 ```
 
 **Signature**: Ed25519 over canonical string.
 
 **Headers**:
-- `X-OpenBox-Agent-DID`: `did:aip:{uuid}`
-- `X-OpenBox-Timestamp`: ISO 8601
-- `X-OpenBox-Nonce`: Random hex
+- `X-OpenBox-Agent-DID`: `did:...`
+- `X-OpenBox-Agent-Timestamp`: ISO 8601
+- `X-OpenBox-Agent-Nonce`: UUID
 - `X-OpenBox-Body-SHA256`: SHA256(body)
 - `X-OpenBox-Agent-Signature`: Base64(Ed25519 sig)
 
-**Key**: Base64 32-byte seed; wrapped in PKCS8 at sign time.
+**Key**: Base64 32-byte seed; wrapped in PKCS8 at sign time (base SDK).
 
 ### 3. Telemetry-Default Policy
 
-**Principle**: Record all events; block nothing by default.
+**Principle**: Record all events; enforcement is opt-in and per-boundary (not one global switch) — see the boundary table above.
 
 **Behavior**:
-- **Default** (`enforceApprovals: false`): Emit governance payloads; apply verdicts as observation only; log approved/blocked actions but don't halt.
-- **Enforced** (`enforceApprovals: true`): Apply block/constrain verdicts; halt observable on block; emit approval request on `require_approval`.
+- **Telemetry** (`enforcement.mode: "telemetry"`, default): every observed/wrapped call is evaluated and recorded; a non-allow verdict is logged, never acted on; `execute` always runs for wrapped server tools.
+- **`enforcement.frontendTools: "enforce"`** (or deprecated `enforceApprovals: true`): BLOCK/HALT verdicts halt the AG-UI observable and emit the redacted `governance_blocked` envelope — gates delivery to the frontend only.
+- **`enforcement.mode: "enforce"`** (server tools wrapped with `bundle.serverTool()` only): BLOCK/HALT/a non-approved `REQUIRE_APPROVAL`/CONSTRAIN all prevent `execute` from running.
+- CONSTRAIN is never applied at any setting — it always raises a typed `CopilotKitUnsupportedVerdictError` at an enforcing boundary.
 
-**Failure Mode**: If evaluate call fails (network, timeout), log error + allow (fail-open); never block user due to SDK error.
+**Failure Mode**: If the evaluate call fails (network, timeout), the base client's `onApiError` policy decides: `fail_open` (default) logs + allows; `fail_closed` blocks; `fail_closed_destructive` only fails closed for a destructive **span**, so it behaves like `fail_open` for both of this SDK's lifecycle/server-tool gates (see `MIGRATION.md`).
 
 ### 4. Multi-Agent Dedup Key
 
@@ -309,14 +320,15 @@ BODY_SHA256 (empty for GET)
 
 ### 5. Approval Workflow
 
-**States**:
-1. `require_approval` verdict → emit approval request with ID
-2. Add approval to `ApprovalRegistry` (in-memory, not persisted)
-3. Adopter polls `client.pollApproval(approvalId)` periodically
-4. Return approval state: `pending | approved | rejected | expired`
-5. Middleware checks registry on next tool call; unblock if approved
+As of `0.4.0`, approval waiting goes through the base SDK's `ApprovalPoller` directly — the earlier in-memory `ApprovalRegistry` design (poll-and-check-on-next-call) is removed.
 
-**Important**: Approval state persists only in-memory for the duration of the workflow. On SDK restart, pending approvals are lost. Approval persistence is deferred to a future release.
+**States**:
+1. `REQUIRE_APPROVAL` verdict → in `enforce` mode, `evaluateLifecycle` awaits the base `ApprovalPoller.waitForDecision(workflowId, runId, activityId)` — a real wait, not a pass-through.
+2. The poller resolves to an approved/rejected/expired/timed-out outcome; a non-approved outcome raises `CopilotKitGovernanceControlError` before `execute` runs.
+3. A finite default wait bound (`approvalMaxWaitMs`, default `900_000` ms / 15 min) prevents an unresolved approval from pinning a call forever; explicit `null` opts into an infinite wait.
+4. On shutdown, an in-flight approval wait is aborted and rejects fail-safe — it never resolves-and-executes after shutdown has started.
+
+**Important**: Approval state itself lives in OpenBox Core, not this SDK. Interrupt state (a related but distinct concept — see "Interrupt semantics" in `MIGRATION.md`) uses a separate, explicitly injectable `InterruptPersistencePort`; the bundled in-memory default is non-durable across a process restart.
 
 ## Observability Architecture
 
@@ -387,15 +399,14 @@ BODY_SHA256 (empty for GET)
 | Evaluate call timeout (>30s) | Retry up to 2x; on all retries fail, log + allow (fail-open) |
 | Network error during evaluate | Retry with backoff; on final failure, log + allow |
 | Malformed `GovernanceVerdictResponse` | Log error; treat as ALLOW (safe default) |
-| Missing approval after `require_approval` verdict | Keep tool blocked until approval resolved or expires (1h TTL) |
+| Missing approval after `REQUIRE_APPROVAL` verdict (`enforce` mode) | Awaits the base `ApprovalPoller` up to `approvalMaxWaitMs` (default 15 min); a rejected/expired/timed-out outcome throws before `execute` runs |
 | SpanBuffer overflow (>1000 spans) | Evict oldest span; log warning |
 
 ### Retry Logic
 
-- **Max retries**: 2
-- **Base delay**: 150ms
-- **Strategy**: Exponential backoff with jitter
-- **Timeout**: 30s total (per request, including all retries)
+As of `0.4.0`, this package's own `evaluateMaxRetries`/`evaluateRetryBaseDelayMs` config fields are deprecated and **not reimplemented** — the base SDK's own client transport owns retries now. The numbers below described this package's pre-`0.4.0` retry loop; see `@openbox-ai/openbox-sdk-ts`'s own documentation for its current transport-retry policy.
+
+- **Timeout**: `timeoutSeconds` (default 30s), configurable via the base config.
 
 ## Performance & Memory
 
@@ -411,7 +422,7 @@ BODY_SHA256 (empty for GET)
 ### Memory Bounds
 
 - **SpanBuffer**: 1000 spans max; ~1MB per workflow
-- **ApprovalRegistry**: In-memory; TTL eviction; <100 approvals typical
+- **InMemoryInterruptStore**: bounded by a per-entry TTL (default 15 min) plus a hard entry-count cap (10,000, FIFO eviction) — non-durable, see `MIGRATION.md`
 - **AsyncLocalStorage context**: <1KB per request
 - **Total per request**: <2MB (hard limit; no unbounded growth)
 

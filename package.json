@@ -1,6 +1,6 @@
 {
   "name": "@openbox-ai/openbox-copilotkit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "OpenBox server-only governance and observability SDK for CopilotKit runtime v2",
   "license": "MIT",
   "author": "OpenBox Team",
@@ -76,15 +76,16 @@
   "types": "./dist/index.d.ts",
   "scripts": {
     "build": "tsup",
+    "check:no-duplicate-signing": "node scripts/check-no-duplicate-signing.mjs",
     "check:no-mastra": "node scripts/check-no-mastra-imports.mjs",
     "check:no-otel": "node scripts/check-no-otel.mjs",
-    "ci:check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run check:no-mastra && npm run check:no-otel",
+    "ci:check": "npm run lint && npm run typecheck && npm run test && npm run build && npm run check:no-mastra && npm run check:no-otel && npm run check:no-duplicate-signing",
     "clean": "rm -rf coverage dist",
     "format": "prettier --write .",
     "lint": "eslint .",
     "pack:check": "npm pack --dry-run",
     "prepack": "npm run clean && npm run build",
-    "prepublishOnly": "npm run lint && npm run typecheck && npm run test && npm run check:no-mastra && npm run check:no-otel",
+    "prepublishOnly": "npm run lint && npm run typecheck && npm run test && npm run check:no-mastra && npm run check:no-otel && npm run check:no-duplicate-signing",
     "test": "vitest run --coverage",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
