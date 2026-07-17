@@ -2,6 +2,7 @@ import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
 
 import type { SpanBuffer } from "../spans/span-buffer.js";
 
+import type { ChildAgentClientCache } from "./internal/child-agent-client-cache.js";
 import type { InterruptPersistencePort } from "./internal/interrupt-store.js";
 import type { RunContextStore } from "./internal/run-context-store.js";
 import type { RunTerminalStateRegistry } from "./internal/run-terminal-state.js";
@@ -48,6 +49,9 @@ export interface OpenBoxRuntimeDefaults {
  * in-memory default is documented as non-durable, never a process-global.
  * `runTerminalState` is the per-run output-dedup/interrupted registry
  * (RT-F14) shared by the AG-UI middleware and `internal/after-request.ts`.
+ * `childAgentClients` is the cache of child-scoped base clients multi-agent
+ * Handoff emission signs with (RT-F10) — one instance per controller, closed
+ * by bundle/runtime shutdown and drained per-run on that run's terminal path.
  */
 export interface OpenBoxRuntimeController {
   runtime: OpenBoxRuntime;
@@ -58,6 +62,7 @@ export interface OpenBoxRuntimeController {
   serverToolOwnership: ServerToolOwnershipRegistry;
   interruptStore: InterruptPersistencePort;
   runTerminalState: RunTerminalStateRegistry;
+  childAgentClients: ChildAgentClientCache;
 }
 
 /**
@@ -198,7 +203,7 @@ export interface OpenBoxMultiAgentOptions {
   parentAgentDid?: string;
   /**
    * Stable id grouping every session of one user-facing run. A string is used
-   * verbatim; a function resolves it per run. Defaults to `mas:${runId}`.
+   * verbatim; a function resolves it per run. Defaults to `copilotkit:${runId}`.
    */
   multiAgentSessionId?: string | ((ctx: MultiAgentSessionContext) => string);
   /** Static tool-name → subagent map. Checked after `resolveHandoff`. */

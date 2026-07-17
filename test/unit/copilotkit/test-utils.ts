@@ -13,6 +13,7 @@ import { EMPTY, Observable } from "rxjs";
 import { vi, type Mock } from "vitest";
 
 import { OpenBoxClient } from "../../../src/client/openbox-client.js";
+import { ChildAgentClientCache } from "../../../src/copilotkit/internal/child-agent-client-cache.js";
 import { InMemoryInterruptStore } from "../../../src/copilotkit/internal/interrupt-store.js";
 import { RunContextStore } from "../../../src/copilotkit/internal/run-context-store.js";
 import { RunTerminalStateRegistry } from "../../../src/copilotkit/internal/run-terminal-state.js";
@@ -171,6 +172,7 @@ export function buildController(
     runtime: options.runtime ?? buildRuntimeStandIn(client),
     runContext: new RunContextStore(),
     telemetryQueue,
+    childAgentClients: new ChildAgentClientCache(),
     defaults: { agentId: "test-agent", workflowType: "copilotkit" },
     logger,
     serverToolOwnership: new ServerToolOwnershipRegistry(),

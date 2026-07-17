@@ -102,3 +102,18 @@ export interface InterruptSignalInput {
   runId: string;
   workflowId: string;
 }
+
+/**
+ * `Handoff` marker input (Decision D1) — the ONLY two fields the base
+ * `handoff()` factory accepts. Unlike every other input above, this carries
+ * no adapter-framework extras (`goal`/`metadata`/run-workflow ids/...): Core's
+ * `ValidateHandoffPayload` needs nothing else, and the factory has no `extra`
+ * bag to carry them even if it wanted to. `openbox-emitter.ts#emitHandoff`
+ * still surfaces the richer adapter-shaped metadata via `onEvent`/logs — see
+ * that method's own doc — but the wire envelope built from this input is
+ * strictly two-field.
+ */
+export interface HandoffEnvelopeInput {
+  fromAgentDid: string;
+  multiAgentSessionId: string;
+}

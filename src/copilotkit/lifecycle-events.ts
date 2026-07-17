@@ -1,6 +1,7 @@
 import {
   activityCompleted,
   activityStarted,
+  handoff,
   signalReceived,
   workflowCompleted,
   workflowFailed,
@@ -11,6 +12,7 @@ import {
 import type {
   ActivityCompletedInput,
   ActivityStartedInput,
+  HandoffEnvelopeInput,
   InterruptSignalInput,
   SignalEmitInput,
   WorkflowCompletedInput,
@@ -232,9 +234,31 @@ export function buildWorkflowFailedEnvelope(input: WorkflowFailedInput): EventEn
   });
 }
 
+/**
+ * `Handoff` marker (Decision D1 — Core-required two-field payload only).
+ * Built directly via the base `handoff()` factory, which accepts no `extra`
+ * bag (unlike every builder above): the rich adapter-shaped metadata callers
+ * have historically attached to a handoff (`child_agent_name`,
+ * `parent_activity_id`, `forwarded_context`, run/workflow ids, `task_queue`,
+ * `workflow_type`, ...) has no wire slot here. `openbox-emitter.ts#emitHandoff`
+ * keeps surfacing that metadata via `onEvent`/logs for local observability,
+ * but the envelope THIS builder produces — the one actually sent to Core —
+ * carries only what `ValidateHandoffPayload` requires:
+ * `from_agent_did`+`multi_agent_session_id`. Core derives `to_agent`
+ * server-side from the child-signed AIP headers (verified
+ * `governance.go:229`/`governance_workflow.go:171`), never from the payload.
+ */
+export function buildHandoffEnvelope(input: HandoffEnvelopeInput): EventEnvelope {
+  return handoff({
+    fromAgentDid: input.fromAgentDid,
+    multiAgentSessionId: input.multiAgentSessionId
+  });
+}
+
 export type {
   ActivityCompletedInput,
   ActivityStartedInput,
+  HandoffEnvelopeInput,
   InterruptSignalInput,
   MultiAgentEventFields,
   SignalEmitInput,

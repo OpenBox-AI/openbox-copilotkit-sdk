@@ -94,10 +94,14 @@ export async function createOpenBoxCopilotKit(
   }
 
   // Full `OpenBoxRuntimeController` shape `serverTool()` needs.
-  // `interruptStore`/`runTerminalState` are unused by `serverTool()` itself
-  // but required by the controller shape; both default the same way
-  // `wrapCopilotRuntimeOptions` does for the `withRuntime` path.
+  // `interruptStore`/`runTerminalState`/`childAgentClients` are unused by
+  // `serverTool()` itself (multi-agent Handoff is an AG-UI middleware
+  // concern) but required by the controller shape; all default/wire the same
+  // way `wrapCopilotRuntimeOptions` does for the `withRuntime` path —
+  // `childAgentClients` in particular is `built.childAgentClients` so this
+  // bundle's own `shutdown()` (== `built.shutdown`) closes the SAME cache.
   const controller: OpenBoxRuntimeController = {
+    childAgentClients: built.childAgentClients,
     defaults: {},
     interruptStore: new InMemoryInterruptStore(),
     logger: logger ?? console,

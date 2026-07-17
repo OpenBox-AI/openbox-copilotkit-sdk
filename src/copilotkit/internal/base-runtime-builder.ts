@@ -10,6 +10,7 @@ import { SDK_METADATA } from "../../sdk-metadata.js";
 import { LifecycleTelemetryQueue, type TelemetryQueueOptions } from "../lifecycle-telemetry.js";
 import type { OpenBoxLogger } from "../types.js";
 
+import { ChildAgentClientCache } from "./child-agent-client-cache.js";
 import { RunContextStore } from "./run-context-store.js";
 
 const ENV_PREFIX = "OPENBOX_COPILOTKIT";
@@ -30,6 +31,11 @@ export interface BaseRuntimeBundle {
   runContext: RunContextStore;
   /** The ONE bounded telemetry sender this controller owns — see `shutdown`'s drain-before-close order. */
   telemetryQueue: LifecycleTelemetryQueue;
+  /**
+   * The ONE cache of child-scoped base clients this controller owns
+   * (multi-agent Handoff, RT-F10) — see `shutdown`'s drain-before-close order.
+   */
+  childAgentClients: ChildAgentClientCache;
   /** Idempotent — safe to call more than once; later calls resolve the first call's promise. */
   shutdown: () => Promise<void>;
 }
@@ -102,6 +108,13 @@ export function buildBaseRuntime(
   // controller — never a process-global.
   const runContext = new RunContextStore();
 
+  // Controller-owned cache of child-scoped base clients for multi-agent
+  // Handoff (RT-F10) — constructed once here (not per `OpenBoxMiddleware`
+  // instance) so a child client built for one request is reused by every
+  // later request this controller serves, and so shutdown has exactly one
+  // cache to drain + close (see the teardown order below).
+  const childAgentClients = new ChildAgentClientCache();
+
   // The ONE bounded, non-blocking telemetry sender this controller owns
   // (Phase 3, fixes B4) — constructed once here so `maxConcurrentSends`/
   // `maxPendingEvents` bound resource use across every run this controller
@@ -117,26 +130,31 @@ export function buildBaseRuntime(
     if (!shutdownPromise) {
       shutdownPromise = (async () => {
         // Teardown order matters (RT-F10):
-        //   1. stop new runs (Phase 5 adds a real latch here, refusing new
-        //      child runtimes before closing the child-client cache)
-        //   2. abort in-flight approvals (below) — never resolve-and-execute
-        //      after shutdown has started
+        //   1. stop new runs — `beginShutdown()` flips the latch
+        //      SYNCHRONOUSLY, before any `await` below gives a concurrently
+        //      in-flight run a window to race a new child past the check.
+        //   2. abort in-flight approvals — never resolve-and-execute after
+        //      shutdown has started.
         //   3. drain the bounded telemetry queue (Phase 3) — bounded by
         //      `flushTimeoutMs`; the queue itself reports+diagnoses any count
         //      still pending after the timeout, never blocking shutdown.
         //   4. flush instrumentation + restore patched globals (Phase 6 stub)
-        //   5. close the runtime last
+        //   5. await every in-flight Handoff emission, then drop every cached
+        //      child client (RT-F10) — never let the process exit mid
+        //      signing-or-send.
+        //   6. close the runtime last.
+        childAgentClients.beginShutdown();
         shutdownController.abort();
         await telemetryQueue.flush();
         // Phase 6: flush instrumentation + restore any patched globals.
-        // Phase 5: await in-flight handoffs, then close cached child runtimes.
+        await childAgentClients.close();
         runtime.close();
       })();
     }
     return shutdownPromise;
   };
 
-  return { runtime, runContext, telemetryQueue, shutdown };
+  return { childAgentClients, runContext, runtime, shutdown, telemetryQueue };
 }
 
 /**

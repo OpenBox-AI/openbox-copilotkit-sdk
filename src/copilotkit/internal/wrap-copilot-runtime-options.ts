@@ -166,10 +166,13 @@ export async function wrapCopilotRuntimeOptions<
 ): Promise<WrapCopilotRuntimeOptionsResult<TOptions>> {
   const logger = extras.logger ?? DEFAULT_LOGGER;
   const telemetryOptions = extras.middlewareOptions?.telemetry;
-  const { runtime, runContext, telemetryQueue, shutdown } = buildBaseRuntime(configInput, {
-    logger,
-    ...(telemetryOptions !== undefined ? { telemetry: telemetryOptions } : {})
-  });
+  const { runtime, runContext, telemetryQueue, childAgentClients, shutdown } = buildBaseRuntime(
+    configInput,
+    {
+      logger,
+      ...(telemetryOptions !== undefined ? { telemetry: telemetryOptions } : {})
+    }
+  );
 
   if (extras.validateApiKeyAtStartup) {
     await runtime.client.validateApiKey();
@@ -179,6 +182,7 @@ export async function wrapCopilotRuntimeOptions<
     runtime,
     runContext,
     telemetryQueue,
+    childAgentClients,
     defaults: extras.defaults ?? {},
     logger,
     serverToolOwnership: new ServerToolOwnershipRegistry(),

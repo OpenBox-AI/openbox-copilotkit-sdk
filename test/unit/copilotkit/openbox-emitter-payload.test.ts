@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { OpenBoxClient } from "../../../src/client/openbox-client.js";
+import type { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+
 import { OpenBoxCopilotKitEmitter } from "../../../src/copilotkit/openbox-emitter.js";
 import { WorkflowEventType } from "../../../src/types/workflow-event-type.js";
 
@@ -11,8 +12,10 @@ import { buildController, flushMacrotask } from "./test-utils.js";
 // before the send reaches `client.evaluate`. `flushMacrotask()` lets that
 // background send settle before a test inspects `evaluateMock`; every
 // PAYLOAD-SHAPE assertion (the actual thing these tests guard) is unchanged.
-// `emitHandoff`/`emitActivityCompletedHook` are unaffected (still direct,
-// legacy paths — see openbox-emitter.ts) and need no flush.
+// `emitActivityCompletedHook` is unaffected (still a direct, unmigrated
+// path — see openbox-emitter.ts) and needs no flush. `emitHandoff` (Phase 5)
+// is also direct/unqueued, but its WIRE send is now the base `handoff()`
+// factory's two-field envelope — see the dedicated tests below.
 
 const FROZEN_REQUIRED_KEYS = [
   "source",
@@ -336,7 +339,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
     expect(payload.parent_workflow_id).toBe("parent-wf");
   });
 
-  it("emitHandoff routes to the child-scoped client with the required fields", async () => {
+  it("emitHandoff sends the child-scoped client ONLY the base two-field envelope (D1)", async () => {
     const { controller, evaluateMock } = buildController();
     const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
     const childEvaluate = vi.fn().mockResolvedValue(null);
@@ -360,10 +363,47 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
     expect(payload.event_type).toBe(WorkflowEventType.HANDOFF);
     expect(payload.from_agent_did).toBe("did:aip:parent");
     expect(payload.multi_agent_session_id).toBe("mas:run-X");
-    expect(payload.workflow_type).toBe("copilotkit");
-    expect(payload.task_queue).toBe("copilotkit");
+    // D1: the base `handoff()` factory carries ONLY the two required fields —
+    // the rich adapter metadata this method historically sent no longer
+    // rides the WIRE at all (it still reaches `onEvent`, see the next test).
+    expect(payload).not.toHaveProperty("workflow_type");
+    expect(payload).not.toHaveProperty("task_queue");
+    expect(payload).not.toHaveProperty("metadata");
+    expect(payload).not.toHaveProperty("run_id");
+    expect(payload).not.toHaveProperty("workflow_id");
+  });
+
+  it("emitHandoff still surfaces the rich adapter metadata via onEvent even when sent to a child", async () => {
+    const onEvent = vi.fn();
+    const { controller } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, onEvent);
+    const childClient = {
+      evaluate: vi.fn().mockResolvedValue(null)
+    } as unknown as OpenBoxClient;
+
+    await emitter.emitHandoff(
+      {
+        fromAgentDid: "did:aip:parent",
+        metadata: { delegate_tool_name: "weatherTool" },
+        multiAgentSessionId: "mas:run-X",
+        runId: "run-X",
+        workflowId: "thread-X"
+      },
+      childClient
+    );
+
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    const arg = onEvent.mock.calls[0]?.[0] as {
+      eventType: string;
+      payload: Record<string, unknown>;
+    };
+    expect(arg.eventType).toBe(WorkflowEventType.HANDOFF);
+    expect(arg.payload.from_agent_did).toBe("did:aip:parent");
+    expect(arg.payload.multi_agent_session_id).toBe("mas:run-X");
+    expect(arg.payload.workflow_type).toBe("copilotkit");
+    expect(arg.payload.task_queue).toBe("copilotkit");
     expect(
-      (payload.metadata as Record<string, unknown>).delegate_tool_name
+      (arg.payload.metadata as Record<string, unknown>).delegate_tool_name
     ).toBe("weatherTool");
   });
 

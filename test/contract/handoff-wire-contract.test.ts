@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 
-import type { OpenBoxClient } from "../../src/client/openbox-client.js";
 import { OpenBoxCopilotKitEmitter } from "../../src/copilotkit/openbox-emitter.js";
 import { WorkflowEventType } from "../../src/types/workflow-event-type.js";
 
@@ -14,9 +13,13 @@ import { buildController } from "../unit/copilotkit/test-utils.js";
  * `internal/content/governance.go` `ValidateHandoffPayload`). The receiver
  * (`to_agent`) is derived server-side from the authenticated emitter's signed
  * AIP headers, NOT the payload. So the two-field marker is *sufficient*, not a
- * gap — this freezes that contract so Phase 5 (which migrates to the base
- * `handoff({fromAgentDid, multiAgentSessionId})` factory, itself two-field) is a
- * provably faithful swap.
+ * gap — this freezes that contract so Phase 5's migration to the base
+ * `handoff({fromAgentDid, multiAgentSessionId})` factory (itself two-field —
+ * `emitHandoff` now builds its WIRE envelope via `buildHandoffEnvelope`, see
+ * `openbox-emitter.ts`) is a provably faithful swap. `emitHandoff`'s second
+ * argument is a base `OpenBoxClient` (child-scoped in production; here it is
+ * `controller.runtime.client` for convenience — this test only cares that
+ * SOME base client's `.evaluate` receives the two required fields).
  */
 describe("wire contract: Handoff carries the two Core-required fields", () => {
   it("emits from_agent_did + multi_agent_session_id (and the HANDOFF event_type)", async () => {
@@ -30,7 +33,7 @@ describe("wire contract: Handoff carries the two Core-required fields", () => {
         runId: "run-1",
         workflowId: "thread-1"
       },
-      controller.runtime.client as unknown as OpenBoxClient
+      controller.runtime.client
     );
 
     expect(evaluateMock).toHaveBeenCalledTimes(1);
@@ -52,7 +55,7 @@ describe("wire contract: Handoff carries the two Core-required fields", () => {
         runId: "run-1",
         workflowId: "thread-1"
       },
-      controller.runtime.client as unknown as OpenBoxClient
+      controller.runtime.client
     );
 
     expect(verdict).toBeNull();

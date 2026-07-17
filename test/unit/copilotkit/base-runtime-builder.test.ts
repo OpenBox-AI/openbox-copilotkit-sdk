@@ -119,6 +119,56 @@ describe("buildBaseRuntime", () => {
     expect(order).toEqual(["flush", "close"]);
   });
 
+  it("exposes one childAgentClients cache and closes it AFTER the telemetry flush but BEFORE the runtime (RT-F10 teardown order)", async () => {
+    const built = buildBaseRuntime(CONFIG);
+    expect(built.childAgentClients).toBeDefined();
+
+    const order: string[] = [];
+    vi.spyOn(built.telemetryQueue, "flush").mockImplementation(async () => {
+      order.push("flush");
+      return { notFlushed: 0 };
+    });
+    const closeChildrenSpy = vi
+      .spyOn(built.childAgentClients, "close")
+      .mockImplementation(async () => {
+        order.push("close-children");
+      });
+    const closeRuntimeSpy = vi.spyOn(built.runtime, "close").mockImplementation(() => {
+      order.push("close-runtime");
+    });
+
+    await built.shutdown();
+
+    expect(closeChildrenSpy).toHaveBeenCalledTimes(1);
+    expect(closeRuntimeSpy).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(["flush", "close-children", "close-runtime"]);
+  });
+
+  it("latches childAgentClients.isShuttingDown SYNCHRONOUSLY as shutdown's very first action (RT-F10) -- before the telemetry flush even starts", async () => {
+    const built = buildBaseRuntime(CONFIG);
+    // Block the flush so we can observe the latch state WHILE shutdown is
+    // still mid-flight, before `close()` (which also sets the latch) runs.
+    let releaseFlush!: () => void;
+    const flushGate = new Promise<void>(resolve => {
+      releaseFlush = resolve;
+    });
+    vi.spyOn(built.telemetryQueue, "flush").mockImplementation(async () => {
+      await flushGate;
+      return { notFlushed: 0 };
+    });
+    vi.spyOn(built.runtime, "close").mockImplementation(() => undefined);
+
+    const shutdownPromise = built.shutdown();
+    // Give the shutdown IIFE's synchronous prefix (`beginShutdown()` +
+    // `shutdownController.abort()`) a chance to run before the flush gate
+    // opens — a single microtask tick is enough since nothing else is queued.
+    await Promise.resolve();
+    expect(built.childAgentClients.isShuttingDown).toBe(true);
+
+    releaseFlush();
+    await shutdownPromise;
+  });
+
   it("threads telemetry options into the queue it constructs", async () => {
     // This test only cares whether the option reached the queue instance
     // (proven by the overflow below), never whether a send actually

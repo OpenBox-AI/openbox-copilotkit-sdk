@@ -15,11 +15,11 @@ import {
   Verdict,
   type EvaluationResult
 } from "@openbox-ai/openbox-sdk-ts";
-import type { OnApiError } from "@openbox-ai/openbox-sdk-ts/config";
+import { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+import { OpenBoxConfig } from "@openbox-ai/openbox-sdk-ts/config";
 import { Observable } from "rxjs";
 
 import { attachAuditEnvelope } from "../audit/audit-envelope.js";
-import { OpenBoxClient } from "../client/openbox-client.js";
 import { getOpenBoxExecutionContext } from "../governance/context.js";
 import type { SpanData } from "../spans/index.js";
 import { readSpanBufferEnv, type SpanBuffer } from "../spans/span-buffer.js";
@@ -135,10 +135,6 @@ interface PerRunState {
  * labelling a tool call `frontend: true`.
  */
 export class OpenBoxMiddleware extends Middleware {
-  // Lazily-built OpenBoxClients scoped to each child agent's identity, keyed by
-  // child DID. Reused across delegations within this middleware instance so the
-  // Ed25519 seed is parsed once per child.
-  readonly #childClientCache = new Map<string, OpenBoxClient>();
   readonly #emitter: OpenBoxCopilotKitEmitter;
   // Governs ONLY the frontend AG-UI TOOL_CALL_END gate (renamed from the
   // deprecated `enforceApprovals` boolean's field name — that boolean is now
@@ -576,7 +572,7 @@ export class OpenBoxMiddleware extends Middleware {
           runId: state.runId,
           workflowId: state.workflowId
         });
-        this.#clearRunOnTerminal(state);
+        await this.#clearRunOnTerminal(state);
         return undefined;
       }
 
@@ -614,7 +610,7 @@ export class OpenBoxMiddleware extends Middleware {
         // RT-F9: a resume that cannot be correlated is a typed failure —
         // never a fabricated completion. Stop here; do not also evaluate
         // this run's own outcome.
-        this.#clearRunOnTerminal(state);
+        await this.#clearRunOnTerminal(state);
         return undefined;
       }
     }
@@ -625,7 +621,7 @@ export class OpenBoxMiddleware extends Middleware {
       await this.#handleInterruptOutcome({ interrupts: outcome.interrupts, state });
       // Keep this run's just-saved pending interrupts — a later resume run
       // reads them back via `interruptStore.take` (RT-F9).
-      this.#clearRunOnTerminal(state, { keepInterrupts: true });
+      await this.#clearRunOnTerminal(state, { keepInterrupts: true });
       return undefined;
     }
 
@@ -664,7 +660,7 @@ export class OpenBoxMiddleware extends Middleware {
       startTime: state.startTime,
       workflowId: state.workflowId
     });
-    this.#clearRunOnTerminal(state);
+    await this.#clearRunOnTerminal(state);
     return undefined;
   }
 
@@ -807,16 +803,23 @@ export class OpenBoxMiddleware extends Middleware {
    * and lose every time), so this run-terminal sweep is the ONE place those
    * claims are guaranteed to be cleaned up, called AFTER every flush path
    * above has already had its chance to observe them.
+   * `childAgentClients.releaseRun` (RT-F10) awaits + drops this run's own
+   * tracked in-flight Handoff emissions — in practice always already settled
+   * by this point (`#maybeEmitHandoff` is awaited by its own caller before
+   * any terminal event is processed), so this is a defensive drain rather
+   * than a source of added latency; async so this method's own caller awaits
+   * it, keeping the run's terminal path from resolving before it completes.
    */
-  #clearRunOnTerminal(
+  async #clearRunOnTerminal(
     state: PerRunState,
     opts: { keepInterrupts?: boolean } = {}
-  ): void {
+  ): Promise<void> {
     this.#runtime.runtime.contextStore.clearHalt(state.workflowId, state.runId);
     if (!opts.keepInterrupts) {
       this.#runtime.interruptStore.clearRun(state.runId);
     }
     this.#runtime.serverToolOwnership.releaseRun(state.runId);
+    await this.#runtime.childAgentClients.releaseRun(state.runId);
   }
 
   /**
@@ -1173,7 +1176,7 @@ export class OpenBoxMiddleware extends Middleware {
       runId: state.runId,
       workflowId: state.workflowId
     });
-    this.#clearRunOnTerminal(state);
+    await this.#clearRunOnTerminal(state);
   }
 
   #isFrontend(call: { name: string }): boolean {
@@ -1201,7 +1204,7 @@ export class OpenBoxMiddleware extends Middleware {
       return configured;
     }
     // Prefix the default so it is distinguishable from raw provider run ids.
-    return `mas:${runId}`;
+    return `copilotkit:${runId}`;
   }
 
   #sessionContext(
@@ -1254,6 +1257,14 @@ export class OpenBoxMiddleware extends Middleware {
    * `to_agent` correctly) when child credentials are configured; otherwise the
    * prepared `OpenBoxMultiAgentContext` is surfaced via `onEvent` for a remote
    * child to emit. Fully isolated from the event pipeline — never throws.
+   *
+   * RT-F10: a blocked parent `ActivityStarted` never reaches this method at
+   * all (the caller only invokes it on the non-blocking path — see
+   * `#emitActivityStartedIfNeeded`), so a blocked delegation already emits
+   * nothing without any check here. Once bundle/runtime shutdown has begun
+   * (`childAgentClients.isShuttingDown`), this method fails the delegation
+   * the SAME way — no child client, no `onEvent` context-export fallback
+   * either — since the cache backing both is being torn down concurrently.
    */
   async #maybeEmitHandoff({
     activityId,
@@ -1270,6 +1281,13 @@ export class OpenBoxMiddleware extends Middleware {
       }
       const parentAgentDid = this.#parentAgentDid;
       if (!parentAgentDid) {
+        return;
+      }
+      if (this.#runtime.childAgentClients.isShuttingDown) {
+        this.#logger.debug?.({
+          note: "openbox multi-agent: shutdown in progress — refusing this delegation, no Handoff emitted",
+          workflow_id: state.workflowId
+        });
         return;
       }
 
@@ -1324,7 +1342,11 @@ export class OpenBoxMiddleware extends Middleware {
         });
       }
 
-      await this.#emitter.emitHandoff(
+      // Track the promise BEFORE awaiting it (RT-F10): a concurrent
+      // bundle/runtime shutdown's `childAgentClients.close()` must be able to
+      // observe and await this SAME in-flight send even if it runs before
+      // this call settles, never let the process exit mid signing-or-send.
+      const handoffPromise = this.#emitter.emitHandoff(
         {
           fromAgentDid: parentAgentDid,
           metadata: handoffMetadata,
@@ -1336,6 +1358,8 @@ export class OpenBoxMiddleware extends Middleware {
         },
         childClient
       );
+      this.#runtime.childAgentClients.trackHandoff(state.runId, handoffPromise);
+      await handoffPromise;
     } catch (err) {
       this.#logger.warn?.({
         err,
@@ -1345,6 +1369,16 @@ export class OpenBoxMiddleware extends Middleware {
     }
   }
 
+  /**
+   * Build (or reuse) the child-scoped BASE client this delegation's Handoff
+   * is signed with. A child CLIENT is sufficient (YAGNI) — a full child
+   * `OpenBoxRuntime` would additionally cost an `ApprovalPoller`/`ContextStore`
+   * this call never needs (the child only signs + sends ONE `client.evaluate`
+   * for the Handoff, never a HITL-gated activity of its own). Cached by
+   * `controller.childAgentClients` (RT-F10), keyed on `childAgentDid`, shared
+   * across every delegation this CONTROLLER serves (not just this middleware
+   * instance).
+   */
   #buildChildClient(
     config: OpenBoxSubagentHandoffConfig
   ): OpenBoxClient | undefined {
@@ -1353,31 +1387,38 @@ export class OpenBoxMiddleware extends Middleware {
       return undefined;
     }
 
-    const cached = this.#childClientCache.get(childAgentDid);
-    if (cached) {
-      return cached;
-    }
-
     try {
-      // The base `OpenBoxClient` has no public props to read (RT-F6) — source
-      // the shared fields from the resolved base config instead. Base config
-      // has no retry concept, so `evaluateMaxRetries`/`evaluateRetryBaseDelayMs`
-      // are not translated here (Phase 2 does not carry these legacy fields
-      // into the runtime at all; full alias translation is Phase 6) and the
-      // legacy child client's own defaults apply.
-      const parentConfig = this.#runtime.runtime.config;
-      const childClient = new OpenBoxClient({
-        agentDid: childAgentDid,
-        agentPrivateKey: childAgentPrivateKey,
-        apiKey: childApiKey,
-        apiUrl: parentConfig.apiUrl,
-        onApiError: toLegacyApiErrorPolicy(parentConfig.onApiError),
-        timeoutSeconds: parentConfig.timeoutSeconds
+      return this.#runtime.childAgentClients.getOrCreate(childAgentDid, () => {
+        // Child-scoped base config: only the credentials that IDENTIFY the
+        // child differ from the parent's own resolved config —
+        // apiUrl/onApiError/timeoutSeconds/sdk* are inherited so a delegated
+        // call follows the SAME outage/timeout/SDK-identity policy as the
+        // parent runtime. `OpenBoxConfig.resolve()` validates eagerly
+        // (agentDid format, apiKey `obx_(live|test)_*` pattern, https/localhost
+        // apiUrl) and throws synchronously on a violation — caught below.
+        const parentConfig = this.#runtime.runtime.config;
+        const childConfig = OpenBoxConfig.resolve({
+          agentDid: childAgentDid,
+          agentPrivateKey: childAgentPrivateKey,
+          apiKey: childApiKey,
+          apiUrl: parentConfig.apiUrl,
+          onApiError: parentConfig.onApiError,
+          sdkEngine: parentConfig.sdkEngine,
+          sdkLanguage: parentConfig.sdkLanguage,
+          sdkVersion: parentConfig.sdkVersion,
+          timeoutSeconds: parentConfig.timeoutSeconds
+        });
+        return new OpenBoxClient(childConfig.apiUrl, childConfig.apiKey, {
+          identity: childConfig.loadIdentity(),
+          onApiError: childConfig.onApiError,
+          sdkEngine: childConfig.sdkEngine,
+          sdkLanguage: childConfig.sdkLanguage,
+          sdkVersion: childConfig.sdkVersion,
+          timeoutSeconds: childConfig.timeoutSeconds
+        });
       });
-      this.#childClientCache.set(childAgentDid, childClient);
-      return childClient;
     } catch (err) {
-      // Bad child DID/key must not crash the run — degrade to context-export.
+      // Bad child DID/key/URL must not crash the run — degrade to context-export.
       this.#logger.warn?.({
         err,
         note: "openbox multi-agent: failed to build child-scoped client (check child DID / private key) — falling back to context-export only"
@@ -1439,16 +1480,6 @@ function extractUserText(message: unknown): unknown {
  */
 function yieldToMacrotaskQueue(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
-}
-
-/**
- * The legacy child client only understands `fail_open`/`fail_closed`. The
- * base config's `fail_closed_destructive` is unreachable through this SDK's
- * own config input type (which never offers that value) — degrade it to the
- * safer `fail_closed` rather than silently falling back to `fail_open`.
- */
-function toLegacyApiErrorPolicy(policy: OnApiError): "fail_open" | "fail_closed" {
-  return policy === "fail_open" ? "fail_open" : "fail_closed";
 }
 
 /**

@@ -6,7 +6,6 @@ import {
 import type { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
 import { defaultPrivacyConfig, type PrivacyConfig } from "@openbox-ai/openbox-sdk-ts/config";
 
-import type { OpenBoxClient as LegacyOpenBoxClient } from "../client/openbox-client.js";
 import type { SpanData } from "../spans/index.js";
 import type { GovernanceVerdictResponse } from "../types/governance-verdict-response.js";
 import { WorkflowEventType } from "../types/workflow-event-type.js";
@@ -14,6 +13,7 @@ import { WorkflowEventType } from "../types/workflow-event-type.js";
 import {
   buildActivityCompletedEnvelope,
   buildActivityStartedEnvelope,
+  buildHandoffEnvelope,
   buildInterruptSignalEnvelope,
   buildSignalReceivedEnvelope,
   buildWorkflowCompletedEnvelope,
@@ -64,9 +64,11 @@ export interface ActivityCompletedHookInput {
 }
 
 /**
- * Input for `emitHandoff`. The marker describes the parent workflow and is
- * sent with the child agent credentials when parent-side handoff emission is
- * available.
+ * Input for `emitHandoff`. `fromAgentDid`/`multiAgentSessionId` are the ONLY
+ * two fields Core requires and the only two that reach the wire (Decision
+ * D1, base `handoff()` factory). Every other field here (`metadata`, `runId`,
+ * `taskQueue`, `workflowId`, `workflowType`) describes the parent workflow for
+ * LOCAL observability only — surfaced via `onEvent`/logs, never sent to Core.
  */
 export interface HandoffEmitInput {
   fromAgentDid: string;
@@ -96,11 +98,14 @@ export interface HandoffEmitInput {
  * directly — that is the ONE place an enforced ActivityStarted reaches Core,
  * so it must never ALSO be enqueued here (no double-send).
  *
- * `emitActivityCompletedHook` (hook-span) and `emitHandoff` still hand-
- * assemble their payload via `withBaseEnvelope`/`toWireSpan` and always
- * evaluate directly (migration deferred — see each method's own note;
- * explicitly out of scope for Phase 3b). Emitter/queue failures are logged
- * and swallowed so telemetry can never break the user stream.
+ * `emitActivityCompletedHook` (hook-span) still hand-assembles its payload via
+ * `withBaseEnvelope`/`toWireSpan` and always evaluates directly (migration
+ * deferred — see that method's own note; explicitly out of scope for Phase
+ * 3b). `emitHandoff` (Phase 5) builds its WIRE envelope via the base
+ * `handoff()` factory (`buildHandoffEnvelope`) but keeps hand-assembling a
+ * separate, richer `onEvent`-only payload via `withBaseEnvelope` — see that
+ * method's own doc for why the two payloads differ. Emitter/queue failures
+ * are logged and swallowed so telemetry can never break the user stream.
  */
 export class OpenBoxCopilotKitEmitter {
   readonly #client: OpenBoxClient;
@@ -343,14 +348,35 @@ export class OpenBoxCopilotKitEmitter {
   }
 
   /**
-   * Emit a multi-agent `Handoff` marker. When `client` is omitted, the payload
-   * is surfaced to `onEvent` so a remote child runtime can emit it itself.
+   * Emit a multi-agent `Handoff` marker.
+   *
+   * Two DIFFERENT payload shapes are involved (Decision D1):
+   *
+   *   1. `observedPayload` — the same rich, adapter-shaped fields this method
+   *      has always assembled (`child_agent_name`, `parent_activity_id`,
+   *      `forwarded_context`, run/workflow ids, `task_queue`, `workflow_type`,
+   *      via `input.metadata`), built with `withBaseEnvelope` exactly like
+   *      before. This is surfaced to `onEvent`/logs ONLY — local
+   *      observability for an operator or a remote child reading
+   *      `metadata.openbox_multi_agent_context` off it (context-export mode).
+   *   2. The WIRE envelope actually sent to Core when `childClient` is
+   *      provided — built via `buildHandoffEnvelope` + `prepareLifecyclePayload`,
+   *      i.e. the base `handoff()` factory's two required fields ONLY
+   *      (`from_agent_did`+`multi_agent_session_id`). The factory has no
+   *      `extra` bag, so none of the rich metadata above can ride on it.
+   *      Core's `ValidateHandoffPayload` needs nothing else — it derives
+   *      `to_agent` server-side from the child-signed AIP headers, never the
+   *      payload.
+   *
+   * When `childClient` is omitted (no child credentials configured), only
+   * `onEvent` fires (context-export) — nothing is sent to Core, matching the
+   * pre-migration contract exactly.
    */
   public async emitHandoff(
     input: HandoffEmitInput,
-    client?: LegacyOpenBoxClient
+    childClient?: OpenBoxClient
   ): Promise<GovernanceVerdictResponse | null> {
-    // Keep invalid handoff markers off the wire.
+    // Keep invalid handoff markers off the wire (and out of onEvent).
     if (!input.fromAgentDid || !input.multiAgentSessionId) {
       this.#logger.warn?.({
         note: "openbox emitHandoff: missing from_agent_did or multi_agent_session_id — skipping handoff",
@@ -359,7 +385,7 @@ export class OpenBoxCopilotKitEmitter {
       return null;
     }
 
-    const payload = withBaseEnvelope({
+    const observedPayload = withBaseEnvelope({
       event_type: WorkflowEventType.HANDOFF,
       from_agent_did: input.fromAgentDid,
       ...(input.metadata ? { metadata: input.metadata } : {}),
@@ -369,19 +395,39 @@ export class OpenBoxCopilotKitEmitter {
       workflow_id: input.workflowId,
       workflow_type: input.workflowType ?? COPILOTKIT_WORKFLOW_TYPE
     });
-
     const emissionMeta = {
       activityId: undefined,
       eventType: WorkflowEventType.HANDOFF,
       workflowId: input.workflowId
     };
+    this.#notifyObserver(observedPayload, emissionMeta);
 
-    if (!client) {
-      this.#notifyObserver(payload, emissionMeta);
+    if (!childClient) {
       return null;
     }
 
-    return this.#evaluateWithLegacyClient(client, payload, emissionMeta);
+    const { payload } = prepareLifecyclePayload(
+      buildHandoffEnvelope({
+        fromAgentDid: input.fromAgentDid,
+        multiAgentSessionId: input.multiAgentSessionId
+      }),
+      { privacy: this.#privacy }
+    );
+
+    try {
+      // Signed AS THE CHILD: `childClient` is a base `OpenBoxClient` scoped to
+      // the child's own DID/key (see `openbox-middleware.ts#buildChildClient`),
+      // never the controller's own parent-scoped `#client`.
+      const result = await childClient.evaluate(payload);
+      return result as unknown as GovernanceVerdictResponse | null;
+    } catch (err) {
+      this.#logger.warn?.({
+        err,
+        event_type: payload.event_type,
+        workflow_id: input.workflowId
+      });
+      return null;
+    }
   }
 
   /**
@@ -431,31 +477,6 @@ export class OpenBoxCopilotKitEmitter {
       // types (`src/types/*` re-exports, out of this migration's scope).
       const result = await this.#client.evaluate(payload as unknown as JsonValue);
       return result as unknown as GovernanceVerdictResponse | null;
-    } catch (err) {
-      this.#logger.warn?.({
-        err,
-        event_type: payload.event_type,
-        workflow_id: payload.workflow_id
-      });
-      return null;
-    }
-  }
-
-  /**
-   * Multi-agent handoff emission still goes through the legacy adapter-owned
-   * client for CHILD credentials — Phase 2 does not migrate child-client
-   * construction (see `openbox-middleware.ts#buildChildClient`); Phase 5
-   * moves child construction to child-scoped base runtimes.
-   */
-  async #evaluateWithLegacyClient(
-    client: LegacyOpenBoxClient,
-    payload: Record<string, unknown>,
-    emissionMeta: Pick<OpenBoxEmission, "activityId" | "eventType" | "workflowId">
-  ): Promise<GovernanceVerdictResponse | null> {
-    this.#notifyObserver(payload, emissionMeta);
-
-    try {
-      return await client.evaluate(payload);
     } catch (err) {
       this.#logger.warn?.({
         err,
@@ -518,10 +539,12 @@ function mergeRedactPathsIntoPrivacy(
 }
 
 /**
- * Hand-built envelope wrapper still used by the two unmigrated payloads
- * (`emitActivityCompletedHook`, `emitHandoff` below) — the six lifecycle/
- * signal methods above build their envelope via `lifecycle-events.ts` and
- * `prepareLifecyclePayload` instead.
+ * Hand-built envelope wrapper still used by `emitActivityCompletedHook`
+ * (fully unmigrated) and by `emitHandoff`'s `onEvent`-only observability
+ * payload (its WIRE send is migrated — built via `buildHandoffEnvelope` +
+ * `prepareLifecyclePayload`, see that method's own doc for why the two
+ * differ). The six lifecycle/signal methods above build their SENT envelope
+ * via `lifecycle-events.ts` and `prepareLifecyclePayload` instead.
  */
 function withBaseEnvelope(
   payload: Record<string, unknown>

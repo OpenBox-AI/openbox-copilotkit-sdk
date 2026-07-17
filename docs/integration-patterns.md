@@ -178,8 +178,8 @@ const { runtime, shutdown } = await withOpenBoxRuntime(
         enabled: true,
         // Optional — defaults to the runtime agentDid above.
         // parentAgentDid: process.env.OPENBOX_COPILOTKIT_AGENT_DID,
-        // Optional — defaults to `mas:${runId}`.
-        // multiAgentSessionId: (ctx) => `mas:${ctx.runId}`,
+        // Optional — defaults to `copilotkit:${runId}`.
+        // multiAgentSessionId: (ctx) => `copilotkit:${ctx.runId}`,
         handoffTools: {
           // Map a delegate tool name to the subagent it invokes.
           weatherTool: {
