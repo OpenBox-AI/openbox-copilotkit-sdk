@@ -108,8 +108,9 @@ describe("OpenBoxMiddleware multi-agent", () => {
     const calls = payloadsOf(evaluateMock);
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
-      // Default session-id prefix is `copilotkit:${runId}` (was `mas:${runId}`).
-      expect(call.multi_agent_session_id).toBe("copilotkit:run-1");
+      // Default session-id prefix is `mas:${runId}` — must match the OpenBox
+      // Mastra child, which derives the same `mas:${runId}` from the shared runId.
+      expect(call.multi_agent_session_id).toBe("mas:run-1");
       // The CopilotKit stream IS the parent — it never carries parent_workflow_id.
       expect(call).not.toHaveProperty("parent_workflow_id");
     }
@@ -145,7 +146,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
 
     const handoff = handoffs[0]!;
     expect(handoff.from_agent_did).toBe(PARENT_DID);
-    expect(handoff.multi_agent_session_id).toBe("copilotkit:run-1");
+    expect(handoff.multi_agent_session_id).toBe("mas:run-1");
     // D1: the base `handoff()` factory is two-field ONLY — none of the rich
     // adapter metadata rides the WIRE anymore (it still reaches `onEvent`,
     // asserted below).
@@ -168,7 +169,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
     expect(meta.parent_activity_id).toBe("call-w");
 
     const ctx = meta.openbox_multi_agent_context as Record<string, unknown>;
-    expect(ctx.multiAgentSessionId).toBe("copilotkit:run-1");
+    expect(ctx.multiAgentSessionId).toBe("mas:run-1");
     expect(ctx.parentAgentDid).toBe(PARENT_DID);
     expect(ctx.parentActivityId).toBe("call-w");
     expect(ctx.parentWorkflowId).toBe("thread-1");
@@ -334,7 +335,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
     const meta = handoffEmissions[0]!.payload.metadata as Record<string, unknown>;
     const ctx = meta.openbox_multi_agent_context as Record<string, unknown>;
     expect(ctx.parentAgentDid).toBe(PARENT_DID);
-    expect(ctx.multiAgentSessionId).toBe("copilotkit:run-1");
+    expect(ctx.multiAgentSessionId).toBe("mas:run-1");
   });
 
   it("supports a custom multiAgentSessionId resolver", async () => {
@@ -427,7 +428,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
 
     expect(forwardContext).toHaveBeenCalledTimes(1);
     const ctx = forwardContext.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(ctx.multiAgentSessionId).toBe("copilotkit:run-1");
+    expect(ctx.multiAgentSessionId).toBe("mas:run-1");
     expect(ctx.parentAgentDid).toBe(PARENT_DID);
     expect(ctx.parentActivityId).toBe("call-w");
     expect(ctx.parentRunId).toBe("run-1");

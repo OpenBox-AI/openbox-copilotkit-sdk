@@ -166,8 +166,10 @@ today.
 - The base `handoff()` factory replaces the hand-built handoff payload. It takes exactly the two
   fields Core's `ValidateHandoffPayload` requires (`from_agent_did`, `multi_agent_session_id`) —
   Core derives the receiver (`to_agent`) from the child-signed AIP headers, never from the payload.
-- The default multi-agent session id prefix changes from `mas:${runId}` to `copilotkit:${runId}`.
-  If you match on this prefix downstream, update the match.
+- The default multi-agent session id prefix stays `mas:${runId}`, unchanged from `0.3.0`. The
+  CopilotKit parent and the OpenBox Mastra child derive it from the same forwarded run id, so a
+  matching prefix keeps one delegated run in a single multi-agent session; no downstream match
+  needs to change.
 - The wire `source` field on the `Handoff` event is now whatever the base `handoff()` factory
   defaults it to (`"workflow-telemetry"`) instead of a CopilotKit-specific value, because the base
   factory accepts no `extra` bag to override it. This is inconsequential to Core (it does not key

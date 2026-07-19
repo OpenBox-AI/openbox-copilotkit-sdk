@@ -586,8 +586,10 @@ Use the base `handoff()` factory and preserve these rules:
 - unwrapped delegation tools are observation-only and must not claim the child
   started after a guaranteed pre-execution handoff.
 
-Change the default session prefix from the copied `mas:${runId}` to
-`copilotkit:${runId}`.
+Keep the default session prefix as `mas:${runId}`. The OpenBox Mastra SDK and
+`@ag-ui/mastra` derive the child's session id as `mas:${runId}` from the same
+forwarded run id, so the parent must use the identical prefix; any other prefix
+splits one delegated run into two OpenBox multi-agent sessions.
 
 ## 16. Public exports and compatibility
 

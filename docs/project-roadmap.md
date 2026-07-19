@@ -239,7 +239,7 @@
 | **Span synthesis** | Foundation only | ✓ + audit envelope + transport | ✓ (unchanged) | — |
 | **Test coverage (lines)** | ≥60% | ≥65% | see `docs/code-standards.md` thresholds | Coverage thresholds did not change as part of this migration |
 | **Server-tool pre-execution enforcement** | none | none | ✓ via `bundle.serverTool()` | New in `0.4.0` — the first boundary with an execution-time guarantee |
-| **Multi-agent support** | Basic dedup | Dedup + context propagation | Base `handoff()` factory; `copilotkit:` session prefix | Handoff payload simplified to the two Core-required fields (D1) |
+| **Multi-agent support** | Basic dedup | Dedup + context propagation | Base `handoff()` factory; `mas:` session prefix retained | Handoff payload simplified to the two Core-required fields (D1) |
 
 ---
 

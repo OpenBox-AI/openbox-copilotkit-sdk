@@ -214,7 +214,7 @@ export interface OpenBoxMultiAgentOptions {
   parentAgentDid?: string;
   /**
    * Stable id grouping every session of one user-facing run. A string is used
-   * verbatim; a function resolves it per run. Defaults to `copilotkit:${runId}`.
+   * verbatim; a function resolves it per run. Defaults to `mas:${runId}`.
    */
   multiAgentSessionId?: string | ((ctx: MultiAgentSessionContext) => string);
   /** Static tool-name → subagent map. Checked after `resolveHandoff`. */

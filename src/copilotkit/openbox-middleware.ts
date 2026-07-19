@@ -1203,8 +1203,12 @@ export class OpenBoxMiddleware extends Middleware {
     if (typeof configured === "string" && configured.length > 0) {
       return configured;
     }
-    // Prefix the default so it is distinguishable from raw provider run ids.
-    return `copilotkit:${runId}`;
+    // Default prefix must stay `mas:` — the OpenBox Mastra SDK and @ag-ui/mastra
+    // derive the child's session id as `mas:${runId}` from the same forwarded
+    // run id. Any other prefix here splits one delegated run into two OpenBox
+    // multi-agent sessions (parent vs child). The prefix also keeps the value
+    // distinguishable from a raw provider run id.
+    return `mas:${runId}`;
   }
 
   #sessionContext(

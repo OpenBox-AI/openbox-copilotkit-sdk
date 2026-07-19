@@ -27,7 +27,7 @@ Full migration onto `@openbox-ai/openbox-sdk-ts` as the base runtime. See [`MIGR
 
 - `middlewareOptions.enforceApprovals` (boolean) is deprecated in favor of `middlewareOptions.enforcement` (`OpenBoxEnforcementOptions`); it still works but now maps to frontend-tool-gate enforcement only, plus a one-time warning that server tools are not covered by it. It was never universal server-tool enforcement, in this release or before.
 - `RUN_FINISHED.outcome` is modeled explicitly; an interrupt outcome no longer emits a successful `ActivityCompleted`/`WorkflowCompleted`.
-- Multi-agent handoff now goes through the base `handoff()` factory (two-field payload; Core derives the receiver from child-signed headers). Default session-id prefix changes from `mas:` to `copilotkit:`. Wire `source` on the handoff is now the base default (`"workflow-telemetry"`) — every other event type still stamps its own `source`.
+- Multi-agent handoff now goes through the base `handoff()` factory (two-field payload; Core derives the receiver from child-signed headers). The default session-id prefix stays `mas:${runId}` (unchanged from `0.3.0`) so the CopilotKit parent and the OpenBox Mastra child, which derive the id from the same forwarded run id, land in one multi-agent session. Wire `source` on the handoff is now the base default (`"workflow-telemetry"`) — every other event type still stamps its own `source`.
 - `./client`, `./config`, `./identity`, `./types` subpaths are now thin, base-delegating shims (documented deprecated, removed at `1.0.0`).
 - Every `OpenBoxConfigInput` field ever accepted keeps working; deprecated fields now warn once per field name, per process, pointing at their base-SDK replacement (see `MIGRATION.md`'s alias table).
 
