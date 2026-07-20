@@ -338,7 +338,7 @@ TBD:       1.0.0 — removes deprecated facades/config aliases; API stability
 | OpenBox API `/api/v1/governance/approval` (polling) | Shipped in 0.4.0 | ✓ — real waiting via the base `ApprovalPoller` |
 | OpenBox API `/api/v1/spans` (transport) | Shipped in 0.3.0 | ✓ |
 | CopilotKit v2 AG-UI event schema stability | Shipped | ✓ |
-| Base `@openbox-ai/openbox-sdk-ts@1.0.1` published to npm | **Not yet done** — this package still depends on `file:../openbox-sdk-ts` | Blocks the actual `npm publish` of this package; see `MIGRATION.md`'s release checklist |
+| Base `@openbox-ai/openbox-sdk-ts@1.0.1` published to npm | Shipped — consumed from npm, exact-pinned at `1.0.1` | ✓ — `npm publish` of *this* package remains; see `MIGRATION.md`'s release checklist |
 | Node.js 24.10.0+ LTS | May 2025 | Assumed stable |
 
 ---

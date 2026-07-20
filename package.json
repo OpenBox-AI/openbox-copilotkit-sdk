@@ -103,7 +103,7 @@
     }
   },
   "dependencies": {
-    "@openbox-ai/openbox-sdk-ts": "file:../openbox-sdk-ts",
+    "@openbox-ai/openbox-sdk-ts": "1.0.1",
     "zod": "^4.1.5"
   },
   "devDependencies": {

@@ -186,18 +186,18 @@ a Core outage, `fail_closed_destructive` behaves exactly like `fail_open` for bo
 enforcement gates. If you need hard outage blocking for server tools or the frontend gate,
 configure `onApiError: "fail_closed"` instead.
 
-### RELEASE CHECKLIST (user-owned — blocked on the base SDK being published)
+### RELEASE CHECKLIST (maintainer-owned)
 
-This package's `@openbox-ai/openbox-sdk-ts` dependency is still `file:../openbox-sdk-ts` as of this
-entry — it was deliberately **not** swapped to a published version as part of this change (that
-swap, and the `npm publish` of this package, are owned by the maintainer and gated on the base SDK
-shipping to npm first). Do not run these steps until the base package is on npm:
+This package's `@openbox-ai/openbox-sdk-ts` dependency is now pinned to the **exact** published
+version `"1.0.1"` from npm (no caret — the base SDK owns all signing/auth/verdict logic, so this
+dependency is deliberately pinned rather than range-matched). The base SDK shipped to npm first;
+what remains is the `npm publish` of *this* package. Steps 1–3 are done; run 4–7 before publishing:
 
-1. Publish base `@openbox-ai/openbox-sdk-ts@1.0.1` to npm.
-2. Swap this package's `dependencies["@openbox-ai/openbox-sdk-ts"]` from `file:../openbox-sdk-ts`
-   to the **exact** string `"1.0.1"` (no caret — RT-F15b; the base SDK now owns all signing/
-   auth/verdict logic, so this dependency is deliberately pinned rather than range-matched).
-3. `npm install` — this purges the `file:` entry from `package-lock.json`.
+1. ✅ Publish base `@openbox-ai/openbox-sdk-ts@1.0.1` to npm.
+2. ✅ Swap this package's `dependencies["@openbox-ai/openbox-sdk-ts"]` from `file:../openbox-sdk-ts`
+   to the **exact** string `"1.0.1"` (no caret; the base SDK now owns all signing/auth/verdict
+   logic, so this dependency is deliberately pinned rather than range-matched).
+3. ✅ `npm install` — purged the `file:` entry from `package-lock.json`.
 4. Provenance check before publishing: `npm view @openbox-ai/openbox-sdk-ts name version
    dist-tags.latest dist.integrity gitHead --json` and confirm the resolved `1.0.1` matches the
    expected `gitHead`/integrity.

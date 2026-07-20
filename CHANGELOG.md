@@ -44,7 +44,7 @@ Full migration onto `@openbox-ai/openbox-sdk-ts` as the base runtime. See [`MIGR
 
 ### Notes
 
-- `@openbox-ai/openbox-sdk-ts` remains a `file:../openbox-sdk-ts` dependency in this release — the swap to a published, exactly-pinned version and the `npm publish` of this package are maintainer-owned next steps, gated on the base package shipping to npm (see `MIGRATION.md`'s release checklist).
+- `@openbox-ai/openbox-sdk-ts` is consumed from npm, exact-pinned at `1.0.1` (no caret — the base SDK now owns all signing/auth/verdict logic, so it is deliberately pinned rather than range-matched). The `npm publish` of this package itself remains the maintainer-owned next step (see `MIGRATION.md`'s release checklist).
 
 ## 0.3.0 — 2026-06-30
 
