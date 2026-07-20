@@ -4,6 +4,18 @@ import {
 } from "./guardrails.js";
 import { Verdict } from "./verdict.js";
 
+/**
+ * Kept local (NOT re-exported from base) — phase-06 facade decision rule:
+ * base's equivalent (`EvaluationResult` in `contracts/results.js`) carries
+ * extra fields this class doesn't (`approvalExpirationTime`, `fallbackUsed`,
+ * `diagnostics`, `raw`), embeds base's own `GuardrailsResult` class (not this
+ * package's `GuardrailsCheckResult` — see that file's own doc), and is built
+ * via a no-arg constructor + static `fromDict` rather than this class's
+ * always-public `GovernanceVerdictResponseInit`-object constructor +
+ * `.fromObject()` static. `client/openbox-client.ts`'s facade still returns
+ * THIS class (translating a base `EvaluationResult` into it at the client
+ * boundary) so external consumers keep the historical shape.
+ */
 export interface GovernanceVerdictResponseInit {
   alignmentScore?: number | undefined;
   approvalId?: string | undefined;

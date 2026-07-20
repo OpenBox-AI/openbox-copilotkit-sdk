@@ -1,3 +1,13 @@
+/**
+ * Kept local (NOT re-exported from base) — phase-06 facade decision rule:
+ * base's equivalent (`GuardrailsResult` in `contracts/results.js`) uses a
+ * DIFFERENT name and a no-arg-constructor + static-`fromDict` pattern (fields
+ * default-initialized, never built via `new GuardrailsResult({...})`), while
+ * this package's `GuardrailsCheckResult` has always taken an init object
+ * through its constructor (`new GuardrailsCheckResult({inputType, ...})` —
+ * see `test/unit/types.test.ts`). Re-exporting base's class under this name
+ * would silently break that constructor contract for existing callers.
+ */
 export interface GuardrailReason {
   field?: string;
   reason?: string;

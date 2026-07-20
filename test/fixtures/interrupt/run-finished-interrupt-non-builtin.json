@@ -1,0 +1,23 @@
+{
+  "description": "RT-F5 fixture: a non-BuiltInAgent interrupt where the interrupt `id` (int-abc) differs from the tool call id (call-xyz) and `toolCallId` is ABSENT on the interrupt. AG-UI interrupts are keyed on `id` (interruptId on resume), NOT toolCallId. Phase 4 MUST key interrupt/resume correlation on `id`; a toolCallId-keyed implementation would pass the BuiltInAgent fixture (id===toolCallId) yet break here.",
+  "events": [
+    { "type": "TOOL_CALL_START", "toolCallId": "call-xyz", "toolCallName": "wireTransfer" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-xyz", "delta": "{\"amount\":9000}" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-xyz" },
+    {
+      "type": "RUN_FINISHED",
+      "threadId": "thread-1",
+      "runId": "run-1",
+      "outcome": {
+        "type": "interrupt",
+        "interrupts": [
+          {
+            "id": "int-abc",
+            "reason": "approval_required",
+            "message": "Approve wireTransfer of 9000?"
+          }
+        ]
+      }
+    }
+  ]
+}

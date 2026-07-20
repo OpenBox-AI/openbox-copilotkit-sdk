@@ -1,6 +1,6 @@
 # API Reference
 
-`@openbox-ai/openbox-copilotkit` exports a small, deliberate public surface. Two framework entry points are what most adopters touch; four shared exports are available for advanced wiring (Pattern 2 in [integration-patterns.md](./integration-patterns.md)).
+`@openbox-ai/openbox-copilotkit` exports a small, deliberate public surface. Three framework entry points are what most adopters touch (`withOpenBoxRuntime`, `createOpenBoxMiddleware`, `createOpenBoxCopilotKit`); a handful of shared exports are available for advanced wiring (Pattern 2 in [integration-patterns.md](./integration-patterns.md)). `@openbox-ai/openbox-sdk-ts` (the base SDK) is a direct dependency and owns config resolution, HTTP transport, DID signing, and verdict/guardrail types — this package's own `./client`/`./config`/`./identity`/`./types` subpaths are deprecated, base-delegating shims kept for one release (see [`MIGRATION.md`](../MIGRATION.md)).
 
 ## Framework exports
 
@@ -70,18 +70,38 @@ function createOpenBoxMiddleware(
 ): Middleware;
 
 interface OpenBoxMiddlewareOptions {
+  /** @deprecated Use `enforcement`. `true` behaves like `enforcement: { frontendTools: "enforce" }` ONLY — never server-tool enforcement. */
   enforceApprovals?: boolean;
+  /** Explicit enforcement model — see `OpenBoxEnforcementOptions` below. Default `{ mode: "telemetry" }`. */
+  enforcement?: OpenBoxEnforcementOptions;
   frontendToolNames?: string[];
   isFrontendTool?: (call: { name: string }) => boolean;
   multiAgent?: OpenBoxMultiAgentOptions;
   onEvent?: (emission: OpenBoxEmission) => void;
+  redactPaths?: string[];
+  spanBuffer?: SpanBuffer;
+  telemetry?: TelemetryQueueOptions;
+  instrumentation?: OpenBoxInstrumentationOptions;
+}
+
+interface OpenBoxEnforcementOptions {
+  /** Governs `bundle.serverTool()`-wrapped server tools. Default `"telemetry"` (never gates `execute`). */
+  mode?: "telemetry" | "enforce";
+  /** Governs the frontend AG-UI `TOOL_CALL_END` delivery gate. Default: follows `mode`. */
+  frontendTools?: "observe" | "enforce";
+  /** Always `"observe"` — an unwrapped server tool has no pre-execution seam this SDK can hook. */
+  unwrappedServerTools?: "observe";
+  approvalPollIntervalMs?: number;
+  /** Bounds an in-flight HITL approval wait; `null` opts into an infinite wait. Default `900_000` (15 min). */
+  approvalMaxWaitMs?: number | null;
 }
 ```
 
 **Parameters**
 
-- `runtime` — an `OpenBoxRuntimeController` (`{ client, defaults, logger }`). Pattern 1 builds this for you; Pattern 2 builds it by hand.
-- `opts.enforceApprovals` — default `false` (telemetry-only). When `true`, the middleware awaits `client.evaluate` + `client.pollApproval` once a tool call's args are complete, before emitting the OpenBox `ActivityStarted` record. A block/halt verdict halts the stream and emits a redacted `governance_blocked` envelope (see below).
+- `runtime` — an `OpenBoxRuntimeController`. Pattern 1 and `createOpenBoxCopilotKit` build this for you; see [`OpenBoxRuntimeController`](#openboxruntimecontroller) below for the real shape (it is richer than early `0.2.x`/`0.3.x` releases — do not hand-construct it from scratch).
+- `opts.enforcement` — the explicit enforcement model (replaces `enforceApprovals`). `mode: "enforce"` only affects tools wrapped with `bundle.serverTool()` (see [`createOpenBoxCopilotKit`](#createopenboxcopilotkitoptions) below) — it has no effect on tools this middleware merely observes. `frontendTools: "enforce"` gates the AG-UI `TOOL_CALL_END` delivery to the frontend; it does **not** gate server-side execution. See [Boundary truthfulness](../MIGRATION.md#boundary-truthfulness--read-this-if-you-rely-on-this-sdk-for-governance) in `MIGRATION.md` for the full three-boundary breakdown.
+- `opts.enforceApprovals` — **deprecated**, default `false`. `true` behaves like `enforcement: { frontendTools: "enforce" }` only, plus a one-time warning that server tools are not covered. When both are set, `enforcement.frontendTools` wins.
 - `opts.frontendToolNames` — explicit allowlist of tool names that should record `frontend: true`. Without this (or `isFrontendTool`), every observed tool call records `frontend: false`, `tool_origin: "copilotkit-observed"` — safe default for backend-routed tools.
 - `opts.isFrontendTool` — alternative callback form. Wins over `frontendToolNames` if both are set.
 - `opts.onEvent` — fired for every emission with `{ activityId?, eventType, payload, workflowId }`. Optional sink for sidecar telemetry pipelines.
@@ -105,9 +125,9 @@ Every tool-call emission carries `tool_origin: "copilotkit-observed"` so downstr
 
 When `multiAgent.enabled` and the `TOOL_CALL_END` tool maps to a configured subagent, the middleware emits one `Handoff` immediately after that tool's `ActivityStarted` (deduplicated per delegation). See [Multi-agent delegation](./integration-patterns.md#multi-agent-delegation-handoff).
 
-#### `enforceApprovals` and the `governance_blocked` envelope
+#### The frontend delivery gate and the `governance_blocked` envelope
 
-When `enforceApprovals: true` and the verdict resolves to `Verdict.BLOCK` or `Verdict.HALT`, the middleware emits a fixed-shape AG-UI `RUN_ERROR` event into the observable and `complete`s the stream:
+When `enforcement.frontendTools: "enforce"` (or the deprecated `enforceApprovals: true`) is set and a tool call's verdict resolves to BLOCK or HALT, the middleware emits a fixed-shape AG-UI `RUN_ERROR` event into the observable and `complete`s the stream:
 
 ```json
 {
@@ -119,7 +139,51 @@ When `enforceApprovals: true` and the verdict resolves to `Verdict.BLOCK` or `Ve
 
 Tool name, tenant id, agent id, and verdict reason **never** appear in this envelope. The `correlationId` resolves to the unredacted record via the OpenBox UI.
 
-This envelope is the **only** wire-format an enforcement block produces — adding fields here is a public-surface change (the `governance-blocked-redaction.test.ts` test asserts byte-for-byte equality).
+This envelope is the **only** wire-format this gate produces — adding fields here is a public-surface change (the `governance-blocked-redaction.test.ts` test asserts byte-for-byte equality).
+
+**This gate prevents the `TOOL_CALL_*` event from being delivered to the frontend. It never prevents a server-side tool from executing** — the middleware only observes the AG-UI stream, it does not stand between a server-side `execute` and the side effect it performs. If you need that guarantee, wrap the tool with `bundle.serverTool()` (below) instead of, or in addition to, this gate.
+
+CONSTRAIN is **not** enforceable at this gate (or anywhere else in `0.4.0`): the base runtime returns a CONSTRAIN verdict normally, so the gate explicitly detects it and raises the same `governance_blocked` envelope via a typed `CopilotKitUnsupportedVerdictError` rather than silently letting the call proceed.
+
+---
+
+### `createOpenBoxCopilotKit(options)`
+
+Bundle entry point for governed server tools — the one boundary in this SDK that can prevent a server-side tool's `execute` from ever running.
+
+**Signature**
+
+```ts
+function createOpenBoxCopilotKit(
+  options?: CreateOpenBoxCopilotKitOptions
+): Promise<OpenBoxCopilotKitBundle>;
+
+interface CreateOpenBoxCopilotKitOptions extends OpenBoxConfigInput {
+  approvalMaxWaitMs?: number | null;
+  enforcement?: OpenBoxEnforcementOptions;
+  logger?: OpenBoxLogger;
+  validateApiKeyAtStartup?: boolean;
+}
+
+interface OpenBoxCopilotKitBundle {
+  openboxRuntime: OpenBoxRuntime;      // the base runtime this bundle owns
+  serverTool: <T>(tool: T) => T;
+  shutdown: () => Promise<void>;
+  withRuntime: (
+    options: CopilotRuntimeOptions,
+    config?: WithOpenBoxRuntimeConfig
+  ) => Promise<WithOpenBoxRuntimeResult>;
+}
+```
+
+**`bundle.serverTool(tool)`**
+
+Wraps a server-side tool (e.g. a `@copilotkit/runtime/v2` `ToolDefinition`) so OpenBox evaluates the call — and, in `enforce` mode, awaits approval for it — **before** the tool's real `execute` runs:
+
+- `enforcement.mode: "enforce"` — BLOCK, HALT, a rejected/expired/timed-out `REQUIRE_APPROVAL`, or CONSTRAIN all prevent `execute` from ever running; the wrapper throws `CopilotKitGovernanceControlError` (or `CopilotKitServerToolCorrelationError` when the per-run correlation `enforce` mode needs is missing — this is a fail-safe, not a silent downgrade to observation).
+- `enforcement.mode: "telemetry"` (default) — `execute` always runs; ActivityStarted/Completed telemetry records best-effort, with a synthetic id marked `generated` when no per-run correlation is available.
+- An approved call's `execute` runs **exactly once**.
+- `bundle.withRuntime(options, config?)` attaches this bundle's config to a CopilotKit runtime the same way `withOpenBoxRuntime` does; it builds its own separate controller (mirroring `shutdown`'s independence), so compose the AG-UI middleware against this bundle's own controller (`createOpenBoxMiddleware`) when you need `serverTool()`'s run correlation to come from the SAME controller that is observing the run.
 
 ---
 
@@ -127,7 +191,9 @@ This envelope is the **only** wire-format an enforcement block produces — addi
 
 These exports are documented inline so adopters can wire this SDK without needing any other package documentation.
 
-### `parseOpenBoxConfig(input?, env?)`
+### `parseOpenBoxConfig(input?, env?)` (deprecated)
+
+> **Deprecated**, removed at `1.0.0`. `withOpenBoxRuntime`/`createOpenBoxCopilotKit` do **not** use this function internally as of `0.4.0` — the real runtime path resolves config through the base SDK's `OpenBoxConfig.resolve()` plus this package's own alias/deprecation translator (see [`MIGRATION.md`](../MIGRATION.md)'s config-alias table). This facade is kept only for callers who imported it directly in `0.2.x`/`0.3.x`.
 
 Reads `OpenBoxConfigInput` overrides + `OPENBOX_*` env vars into a fully-resolved `OpenBoxConfig`.
 
@@ -150,7 +216,9 @@ const cfg = parseOpenBoxConfig({ onApiError: "fail_closed" });
 
 ---
 
-### `OpenBoxClient`
+### `OpenBoxClient` (deprecated facade)
+
+> **Deprecated**, removed at `1.0.0`. This is this package's own thin, base-delegating facade (`src/client/openbox-client.ts`) — DID validation, key-loading, canonicalization, and Ed25519 signing all delegate to `@openbox-ai/openbox-sdk-ts/identity`; there is no second signer. As of `0.4.0`, `withOpenBoxRuntime`/`createOpenBoxCopilotKit` construct and use the **base SDK's own** `OpenBoxClient` (`@openbox-ai/openbox-sdk-ts/client`) internally instead of this facade — its constructor is positional (`new OpenBoxClient(apiUrl, apiKey, options)`), not the object shape below. This facade's object-shape constructor is preserved only for callers who imported it directly in `0.2.x`/`0.3.x`.
 
 HTTP client for the OpenBox Core API. Built per-process; reused across requests by `withOpenBoxRuntime`.
 
@@ -194,23 +262,35 @@ When `agentDid` + `agentPrivateKey` are set, every request signs with five DID i
 - `onApiError: "fail_open" | "fail_closed"` — default `fail_open` (governance failure does not block the user).
 - `governanceTimeout: number` (seconds), `evaluateMaxRetries`, `evaluateRetryBaseDelayMs` — wire-level tuning.
 - `skipActivityTypes`, `skipSignals`, `skipWorkflowTypes`, `skipHitlActivityTypes: Set<string>` — coarse filters; merged from `OPENBOX_SKIP_*` env vars (CSV).
-- `httpCapture: boolean` — default `true`; reserved for configuration compatibility. As of 0.2.0-beta.0 this SDK does not capture HTTP/DB/file telemetry — the value is read at config-parse time but has no behavioral effect here.
+- `httpCapture: boolean` — **deprecated, inert**, removed at `1.0.0`. Use `instrumentation: { enabled: true }` instead (HTTP instrumentation defaults on once instrumentation is enabled).
 
-The remaining `OpenBoxConfigInput` fields — `hitlEnabled` (default `true`), `maxEvaluatePayloadBytes` (default `256_000`), `sendActivityStartEvent` (default `true`), `sendStartEvent` (default `true`), `validate` (default `true`, calls `OpenBoxClient.validateApiKey()` at boot) — are stable internal-tuning knobs. Override via the matching `OPENBOX_*` env var or by passing the field to `parseOpenBoxConfig` / `WithOpenBoxRuntimeConfig`. The full schema lives in `src/config/openbox-config.ts`.
+The remaining `OpenBoxConfigInput` fields — `hitlEnabled` (deprecated → `hitl.enabled`), `maxEvaluatePayloadBytes` (deprecated → `telemetry.maxPayloadBytes`), `sendActivityStartEvent`/`sendStartEvent` (deprecated → `gate.sendActivityStartEvent`/`gate.sendStartEvent`), `validate` (default `true`; format/shape validation only — never a network call) — every deprecated field keeps working and warns once per field name, per process. See [`MIGRATION.md`](../MIGRATION.md)'s config-alias table for the full deprecated → base-SDK mapping, and note that `withOpenBoxRuntime`/`createOpenBoxCopilotKit` resolve config through `src/copilotkit/internal/config-translator.ts`, not this deprecated type's own schema.
+
+New in `0.4.0` (not part of the deprecated `OpenBoxConfigInput` shape above): `enforcement` (`OpenBoxEnforcementOptions`), `instrumentation` (`{ enabled, databases?, strict? }`, off by default), `validateApiKeyAtStartup` (boolean, default `false` — the only opt-in path that performs a network call at setup time), and `telemetry` (bounded-queue options: `maxPendingEvents`, `maxConcurrentSends`, `flushTimeoutMs`, `overflowPolicy`, `maxPayloadBytes`).
 
 ---
 
 ### `OpenBoxRuntimeController`
 
-Wire-level dependencies attached to an OpenBox-wrapped `CopilotRuntime` via the private `OPENBOX_COPILOTKIT_RUNTIME_SYMBOL`. Pattern 1 constructs and attaches it for you; Pattern 2 builds it by hand.
+Wire-level dependencies attached to an OpenBox-wrapped `CopilotRuntime` via the private `OPENBOX_COPILOTKIT_RUNTIME_SYMBOL`. Pattern 1 and `createOpenBoxCopilotKit` construct and attach/own it for you.
+
+As of `0.4.0` this is a richer internal shape than earlier releases — it owns the one base `OpenBoxRuntime` this controller uses plus every controller-scoped piece the middleware and `serverTool()` need:
 
 ```ts
 interface OpenBoxRuntimeController {
-  client: OpenBoxClient;
-  defaults: OpenBoxRuntimeDefaults;     // { agentId?, tenantId?, workflowType? }
-  logger: OpenBoxLogger;                // console-style sink
+  runtime: OpenBoxRuntime;                          // the one base OpenBoxRuntime (config, client, adapter)
+  runContext: RunContextStore;                      // per-run context store (D7) — separate from the base per-runtime ContextStore
+  telemetryQueue: LifecycleTelemetryQueue;           // bounded, non-blocking telemetry sender (fixes B4)
+  defaults: OpenBoxRuntimeDefaults;                 // { agentId?, tenantId?, workflowType? }
+  logger: OpenBoxLogger;                            // console-style sink
+  serverToolOwnership: ServerToolOwnershipRegistry;  // (runId, toolCallId) claim registry (RT-F15)
+  interruptStore: InterruptPersistencePort;          // injectable pending-interrupt persistence (RT-F9)
+  runTerminalState: RunTerminalStateRegistry;        // per-run output-dedup/interrupted registry (RT-F14)
+  childAgentClients: ChildAgentClientCache;          // cache of child-scoped clients for multi-agent Handoff
 }
 ```
+
+This type is not meant to be hand-constructed. `createOpenBoxMiddleware(runtime, opts)` *receives* a fully-built controller rather than building one itself — get one from `withOpenBoxRuntime` or `createOpenBoxCopilotKit` (Pattern 2's hand-built `{ client, defaults, logger }` object in [integration-patterns.md](./integration-patterns.md) predates this richer `0.4.0` shape and is out of date — see the note on that pattern).
 
 ---
 
@@ -222,13 +302,13 @@ Already documented under [`createOpenBoxMiddleware`](#createopenboxmiddlewarerun
 
 ## DID signing and identity headers
 
-When `agentDid` + `agentPrivateKey` are configured, `OpenBoxClient` signs every outbound request with these five headers (defined in `identity/agent-identity.ts`):
+When `agentDid` + `agentPrivateKey` are configured, every outbound governance request signs with these five headers. As of `0.4.0`, the header NAMES, canonical-request assembly, and Ed25519 signing all delegate to `@openbox-ai/openbox-sdk-ts/identity` (`HEADER_*` constants, `buildCanonicalString`, `AgentIdentity`) — there is no second signer in this package; nonce/timestamp *generation* stays adapter-owned so wire values are unchanged from earlier releases:
 
 | Header | Contents |
 |---|---|
-| `X-OpenBox-Agent-DID` | The `did:openbox:...` identifier |
-| `X-OpenBox-Agent-Timestamp` | Unix epoch seconds at request send |
-| `X-OpenBox-Agent-Nonce` | Per-request random nonce |
+| `X-OpenBox-Agent-DID` | The `did:...` identifier |
+| `X-OpenBox-Agent-Timestamp` | ISO 8601 timestamp at request send |
+| `X-OpenBox-Agent-Nonce` | Per-request random nonce (UUID) |
 | `X-OpenBox-Body-SHA256` | SHA-256 of the request body (binds the signature to the payload) |
 | `X-OpenBox-Agent-Signature` | Ed25519 signature over `METHOD\nPATH\nTIMESTAMP\nNONCE\nBODY_SHA256` |
 
@@ -244,8 +324,8 @@ These topics are currently covered in the main docs and can split into
 dedicated pages as the public surface grows:
 
 - `architecture.md`, `event-model.md` — content merged into this page (event matrix + emission shape).
-- `approvals-and-guardrails.md` — content merged into `enforceApprovals` section + [troubleshooting](./troubleshooting.md).
+- `approvals-and-guardrails.md` — content merged into the enforcement-boundary sections above + [troubleshooting](./troubleshooting.md).
 - `security-and-privacy.md` — content merged into [installation security & privacy](./installation.md#security-and-privacy) + DID-signing trust note.
-- `configuration.md` — content merged into `OpenBoxConfigInput` field reference.
+- `configuration.md` — content merged into `OpenBoxConfigInput` field reference + [`MIGRATION.md`](../MIGRATION.md)'s alias table.
 
-When the public surface grows past two framework exports, these split out.
+When the public surface grows past three framework exports, these split out.

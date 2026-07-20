@@ -126,7 +126,7 @@ describe("wrapCopilotRuntimeOptions — controller + shutdown", () => {
       CONFIG
     );
 
-    expect(controller.client).toBeDefined();
+    expect(controller.runtime.client).toBeDefined();
     expect(controller.logger).toBeDefined();
 
     await expect(shutdown()).resolves.toBeUndefined();
@@ -201,7 +201,7 @@ describe("wrapCopilotRuntimeOptions — middleware composition (happy path)", ()
       calls.push("openbox");
       return null;
     });
-    (controller.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
+    (controller.runtime.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
       evaluateMock;
 
     const wrappedAfter = next.afterRequestMiddleware!;

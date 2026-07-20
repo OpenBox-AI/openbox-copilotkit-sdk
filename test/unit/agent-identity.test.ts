@@ -10,6 +10,7 @@ import {
   createAgentIdentityHeaders,
   validateAgentIdentityConfig
 } from "../../src/identity/index.js";
+import { OpenBoxConfigError } from "../../src/types/index.js";
 
 const ED25519_PKCS8_SEED_PREFIX = "302e020100300506032b657004220420";
 
@@ -65,12 +66,21 @@ describe("validateAgentIdentityConfig", () => {
   it("rejects invalid DID values", () => {
     const identity = createTestIdentity();
 
+    // Message wording now comes from base's `validateAgentDid` (delegated
+    // validation, RT-F6/D3) — the class stays this package's own
+    // `OpenBoxConfigError` so existing `instanceof` checks keep working.
     expect(() => {
       validateAgentIdentityConfig({
         ...identity,
         did: "did:web:agent"
       });
-    }).toThrow("Invalid OpenBox agent DID");
+    }).toThrow(/Invalid agent DID/);
+    expect(() => {
+      validateAgentIdentityConfig({
+        ...identity,
+        did: "did:web:agent"
+      });
+    }).toThrow(OpenBoxConfigError);
   });
 
   it("rejects private keys that are not 32-byte base64 Ed25519 seeds", () => {
@@ -81,7 +91,13 @@ describe("validateAgentIdentityConfig", () => {
         ...identity,
         privateKey: Buffer.from("not-a-seed").toString("base64")
       });
-    }).toThrow("Invalid OpenBox agent private key");
+    }).toThrow(/Invalid agent private key/);
+    expect(() => {
+      validateAgentIdentityConfig({
+        ...identity,
+        privateKey: Buffer.from("not-a-seed").toString("base64")
+      });
+    }).toThrow(OpenBoxConfigError);
   });
 });
 

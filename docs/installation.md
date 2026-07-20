@@ -70,7 +70,10 @@ This is the complete change set for a CopilotKit app that already has a `runtime
 +     middlewareOptions: {
 +       // List every useFrontendTool name from the React side here.
 +       frontendToolNames: ["setThemeColor"],
-+       // Set true to block on Verdict.BLOCK / Verdict.HALT verdicts.
++       // Deprecated boolean — `true` enforces the FRONTEND delivery gate only
++       // (never server-side tool execution). See MIGRATION.md; prefer
++       // `enforcement: { frontendTools: "enforce" }` and, for a server tool
++       // you need to gate BEFORE it runs, `createOpenBoxCopilotKit(...).serverTool()`.
 +       enforceApprovals: false,
 +     },
 +   }
@@ -107,7 +110,7 @@ If the dashboard is empty, jump to [troubleshooting → "useFrontendTool calls s
 
 - **API keys** are sent in `Authorization: Bearer …`; the SDK refuses non-HTTPS `apiUrl` values for non-localhost hosts (`parseOpenBoxConfig` throws `OpenBoxInsecureURLError`).
 - **DID signatures** bind every request to method + path + timestamp + nonce + body SHA-256, replay-protected; bodies are size-capped (default 10 MiB).
-- **Governance block** verdicts emit a fixed-shape redacted envelope `{ type: 'error', code: 'governance_blocked', correlationId }` — tool name, tenant id, and verdict reason never reach the client (see [api-reference → governance-blocked envelope](./api-reference.md#enforceapprovals-and-the-governance_blocked-envelope)).
+- **Governance block** verdicts emit a fixed-shape redacted envelope `{ type: 'error', code: 'governance_blocked', correlationId }` — tool name, tenant id, and verdict reason never reach the client. This gate prevents *delivery to the frontend*, not server-side tool execution (see [api-reference → the frontend delivery gate](./api-reference.md#the-frontend-delivery-gate-and-the-governance_blocked-envelope)).
 - **AsyncLocalStorage** scopes per-request tenant/agent context — Node-only.
 
 Security-relevant behavior is summarized here and in [api-reference.md](./api-reference.md).

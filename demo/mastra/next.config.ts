@@ -10,6 +10,7 @@ const nextConfig: NextConfig = {
     "@copilotkit/runtime",
     "@openbox-ai/openbox-copilotkit",
     "@openbox-ai/openbox-mastra-sdk",
+    "@openbox-ai/openbox-sdk-ts",
   ],
   env: {
     NEXT_PUBLIC_COPILOTKIT_THREADS_ENABLED: process.env.COPILOTKIT_LICENSE_TOKEN

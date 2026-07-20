@@ -1,9 +1,11 @@
 import { Buffer } from "node:buffer";
 
 import { EventType, type BaseEvent } from "@ag-ui/client";
+import { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+import { OpenBoxConfig } from "@openbox-ai/openbox-sdk-ts/config";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { OpenBoxClient } from "../../../src/client/openbox-client.js";
+import { GOVERNANCE_BLOCKED_ERROR_CODE } from "../../../src/copilotkit/governance-blocked-error.js";
 import { createOpenBoxMiddleware } from "../../../src/copilotkit/openbox-middleware.js";
 import type { OpenBoxSubagentHandoffConfig } from "../../../src/copilotkit/types.js";
 import { WorkflowEventType } from "../../../src/types/workflow-event-type.js";
@@ -16,18 +18,23 @@ import {
 } from "./test-utils.js";
 
 // Valid 32-byte base64 Ed25519 seed + uuid-shaped DIDs. The seed only needs to
-// pass the constructor's length/round-trip check — signing is never exercised
-// because the child client's evaluate is stubbed via the prototype spy.
+// pass the base `OpenBoxConfig`/`AgentIdentity` constructor's length/round-trip
+// check — signing is never exercised because the child client's `evaluate` is
+// stubbed via the base `OpenBoxClient.prototype` spy. `childApiKey` must match
+// the base SDK's `obx_(live|test)_*` pattern (`OpenBoxConfig.resolve()`
+// validates eagerly and throws otherwise — unlike the pre-migration legacy
+// child client, which accepted any string).
 const CHILD_SEED = Buffer.alloc(32, 7).toString("base64");
 const CHILD_DID = "did:aip:11111111-1111-1111-1111-111111111111";
 const PARENT_DID = "did:aip:22222222-2222-2222-2222-222222222222";
+const CHILD_API_KEY = "obx_test_child_agent";
 
 const handoffTools: Record<string, OpenBoxSubagentHandoffConfig> = {
   weatherTool: {
     childAgentDid: CHILD_DID,
     childAgentName: "mastra-weather-agent",
     childAgentPrivateKey: CHILD_SEED,
-    childApiKey: "child-key",
+    childApiKey: CHILD_API_KEY,
     childTaskQueue: "mastra",
     childWorkflowType: "weather-agent"
   }
@@ -62,6 +69,12 @@ function payloadsOf(mock: { mock: { calls: unknown[][] } }): Record<string, unkn
   return mock.mock.calls.map(args => args[0] as Record<string, unknown>);
 }
 
+function findBlockedFrame(events: BaseEvent[]): BaseEvent | undefined {
+  return events.find(
+    e => e.type === EventType.RUN_ERROR && (e as { code?: string }).code === GOVERNANCE_BLOCKED_ERROR_CODE
+  );
+}
+
 describe("OpenBoxMiddleware multi-agent", () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -81,6 +94,9 @@ describe("OpenBoxMiddleware multi-agent", () => {
   });
 
   it("stamps a shared multi_agent_session_id on every parent event when enabled", async () => {
+    // This run also triggers a real child delegation (`handoffTools` below) —
+    // stub the child's `evaluate` so it never attempts a real network fetch.
+    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null as never);
     const { controller, evaluateMock } = buildController();
     const middleware = createOpenBoxMiddleware(controller, {
       multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID }
@@ -92,19 +108,23 @@ describe("OpenBoxMiddleware multi-agent", () => {
     const calls = payloadsOf(evaluateMock);
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
+      // Default session-id prefix is `mas:${runId}` — must match the OpenBox
+      // Mastra child, which derives the same `mas:${runId}` from the shared runId.
       expect(call.multi_agent_session_id).toBe("mas:run-1");
       // The CopilotKit stream IS the parent — it never carries parent_workflow_id.
       expect(call).not.toHaveProperty("parent_workflow_id");
     }
   });
 
-  it("emits exactly one child-authenticated Handoff for a mapped delegation tool", async () => {
+  it("emits exactly one child-signed Handoff (base handoff() factory, two-field wire) for a mapped delegation tool", async () => {
     const childEvaluate = vi
       .spyOn(OpenBoxClient.prototype, "evaluate")
-      .mockResolvedValue(null);
+      .mockResolvedValue(null as never);
+    const onEvent = vi.fn();
     const { controller, evaluateMock } = buildController();
     const middleware = createOpenBoxMiddleware(controller, {
-      multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID }
+      multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID },
+      onEvent
     });
     const agent = new ScriptedAgent({ events: weatherToolEvents() });
 
@@ -117,6 +137,8 @@ describe("OpenBoxMiddleware multi-agent", () => {
       )
     ).toHaveLength(0);
 
+    // Signed AS THE CHILD: the base `OpenBoxClient` this middleware built from
+    // the child's own DID/key received the send, never the parent's client.
     const handoffs = childEvaluate.mock.calls
       .map(args => args[0] as Record<string, unknown>)
       .filter(p => p.event_type === WorkflowEventType.HANDOFF);
@@ -125,10 +147,21 @@ describe("OpenBoxMiddleware multi-agent", () => {
     const handoff = handoffs[0]!;
     expect(handoff.from_agent_did).toBe(PARENT_DID);
     expect(handoff.multi_agent_session_id).toBe("mas:run-1");
-    expect(handoff.workflow_type).toBe("copilotkit");
-    expect(handoff.task_queue).toBe("copilotkit");
+    // D1: the base `handoff()` factory is two-field ONLY — none of the rich
+    // adapter metadata rides the WIRE anymore (it still reaches `onEvent`,
+    // asserted below).
+    expect(handoff).not.toHaveProperty("workflow_type");
+    expect(handoff).not.toHaveProperty("task_queue");
+    expect(handoff).not.toHaveProperty("metadata");
+    expect(handoff).not.toHaveProperty("run_id");
+    expect(handoff).not.toHaveProperty("workflow_id");
 
-    const meta = handoff.metadata as Record<string, unknown>;
+    // The rich metadata is still observable locally via `onEvent`.
+    const observedHandoff = onEvent.mock.calls
+      .map(args => args[0] as { eventType: string; payload: Record<string, unknown> })
+      .find(e => e.eventType === (WorkflowEventType.HANDOFF as string));
+    expect(observedHandoff).toBeDefined();
+    const meta = observedHandoff?.payload.metadata as Record<string, unknown>;
     expect(meta.delegate_tool_name).toBe("weatherTool");
     expect(meta.child_agent_name).toBe("mastra-weather-agent");
     expect(meta.child_workflow_type).toBe("weather-agent");
@@ -145,7 +178,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
   it("does not emit a Handoff for an unmapped tool", async () => {
     const childEvaluate = vi
       .spyOn(OpenBoxClient.prototype, "evaluate")
-      .mockResolvedValue(null);
+      .mockResolvedValue(null as never);
     const { controller, evaluateMock } = buildController();
     const middleware = createOpenBoxMiddleware(controller, {
       multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID }
@@ -180,7 +213,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
   it("deduplicates the Handoff across TOOL_CALL_END, RESULT, and run-finished flush", async () => {
     const childEvaluate = vi
       .spyOn(OpenBoxClient.prototype, "evaluate")
-      .mockResolvedValue(null);
+      .mockResolvedValue(null as never);
     const { controller } = buildController();
     const middleware = createOpenBoxMiddleware(controller, {
       multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID }
@@ -195,17 +228,78 @@ describe("OpenBoxMiddleware multi-agent", () => {
     expect(handoffs).toHaveLength(1);
   });
 
-  it("throws at construction when enabled without a resolvable parent DID", () => {
+  it("blocked delegation emits no Handoff and builds no child client", async () => {
+    const childEvaluate = vi
+      .spyOn(OpenBoxClient.prototype, "evaluate")
+      .mockResolvedValue(null as never);
+    const evaluateMock = vi
+      .fn()
+      .mockResolvedValue({ reason: "policy denied", verdict: "block" });
+    const { controller } = buildController({ evaluateMock });
+    const middleware = createOpenBoxMiddleware(controller, {
+      // Frontend-enforce is the only path that can return a block BEFORE
+      // `#maybeEmitHandoff` runs (telemetry mode never blocks) — see
+      // `#emitActivityStartedIfNeeded`.
+      enforcement: { frontendTools: "enforce" },
+      multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID }
+    });
+    const agent = new ScriptedAgent({ events: weatherToolEvents() });
+
+    const events = await collectEvents(
+      middleware.run(buildRunAgentInput(), agent)
+    );
+
+    expect(findBlockedFrame(events)).toBeDefined();
+    // No child client was ever built/signed, and the parent stream carries no Handoff either.
+    expect(childEvaluate).not.toHaveBeenCalled();
+    expect(
+      payloadsOf(evaluateMock).filter(
+        p => p.event_type === WorkflowEventType.HANDOFF
+      )
+    ).toHaveLength(0);
+  });
+
+  it("caches the child client across separate middleware instances sharing the same controller", async () => {
+    // RT-F10: the cache moved from per-`OpenBoxMiddleware`-instance ownership
+    // to the controller (`childAgentClients`) specifically so it survives
+    // across requests — each `wrapAgentInProxy` clone builds a FRESH
+    // `OpenBoxMiddleware`, so this proves the fix actually reaches cross-run
+    // reuse rather than rebuilding (and re-validating/re-decoding the Ed25519
+    // seed for) the same child on every single delegation.
+    const resolveSpy = vi.spyOn(OpenBoxConfig, "resolve");
+    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null as never);
     const { controller } = buildController();
-    expect(() =>
-      createOpenBoxMiddleware(controller, { multiAgent: { enabled: true } })
-    ).toThrow(/parent agent DID/i);
+    const childConfigCallsBefore = resolveSpy.mock.calls.length;
+
+    const firstMiddleware = createOpenBoxMiddleware(controller, {
+      multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID }
+    });
+    await collectEvents(
+      firstMiddleware.run(
+        buildRunAgentInput({ runId: "run-1", threadId: "thread-1" }),
+        new ScriptedAgent({ events: weatherToolEvents() })
+      )
+    );
+
+    const secondMiddleware = createOpenBoxMiddleware(controller, {
+      multiAgent: { enabled: true, handoffTools, parentAgentDid: PARENT_DID }
+    });
+    await collectEvents(
+      secondMiddleware.run(
+        buildRunAgentInput({ runId: "run-2", threadId: "thread-2" }),
+        new ScriptedAgent({ events: weatherToolEvents() })
+      )
+    );
+
+    // Exactly one child config/client was resolved across BOTH delegations —
+    // the second middleware instance reused the first's cached child client.
+    expect(resolveSpy.mock.calls.length - childConfigCallsBefore).toBe(1);
   });
 
   it("falls back to context-export (onEvent only) when child credentials are absent", async () => {
     const childEvaluate = vi
       .spyOn(OpenBoxClient.prototype, "evaluate")
-      .mockResolvedValue(null);
+      .mockResolvedValue(null as never);
     const onEvent = vi.fn();
     const { controller, evaluateMock } = buildController();
     const middleware = createOpenBoxMiddleware(controller, {
@@ -315,7 +409,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
   });
 
   it("invokes forwardContext with the built context and merges its result into handoff metadata", async () => {
-    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null);
+    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null as never);
     const forwardContext = vi.fn().mockReturnValue({ stashed: true });
     const onEvent = vi.fn();
     const { controller } = buildController();
@@ -348,7 +442,7 @@ describe("OpenBoxMiddleware multi-agent", () => {
   });
 
   it("isolates a throwing forwardContext adapter (run completes, handoff still emitted, no forwarded_context)", async () => {
-    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null);
+    vi.spyOn(OpenBoxClient.prototype, "evaluate").mockResolvedValue(null as never);
     const onEvent = vi.fn();
     const { controller, logger } = buildController();
     const middleware = createOpenBoxMiddleware(controller, {

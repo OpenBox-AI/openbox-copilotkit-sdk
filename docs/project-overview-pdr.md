@@ -1,7 +1,7 @@
 # OpenBox CopilotKit SDK — Project Overview & PDR
 
-**Version**: 0.3.0
-**Updated**: 2026-06-30
+**Version**: 0.4.0
+**Updated**: 2026-07-17
 **License**: MIT
 
 ## What & Why
@@ -10,16 +10,15 @@
 
 **Why**: CopilotKit's per-framework SDKs (React, Vue, etc.) can't see cross-framework patterns. The AG-UI middleware boundary is the unique vantage point to observe complete workflows, synthesize spans, and correlate multi-agent handoffs.
 
-**Who**: Node.js backend adopters running CopilotKit `runtime/v2` who need governance (block/constrain tools, require HITL approval) and observability (audit trails, span synthesis).
+**Who**: Node.js backend adopters running CopilotKit `runtime/v2` who need governance (block tools, gate HITL approval, optionally prevent a wrapped server tool from executing at all) and observability (audit trails, span synthesis).
 
 ## Functional Requirements
 
 ### Core Governance Path
 
-- **Tool observation**: Observe `TOOL_CALL_*` events from AG-UI; emit `ActivityStarted` → call `client.evaluate(payload)`.
-- **Verdict enforcement**: Map `GovernanceVerdictResponse` to 5-case discriminated union (`allow | block | constrain | require_approval | halt`); apply synchronously.
-- **Blocking**: Inject `RUN_ERROR` with `governance_blocked` code; halt observable to prevent tool execution.
-- **Approval tracking**: Store pending approvals in-memory; poll via `client.pollApproval(approval_id)` to resolve.
+- **Tool observation**: Observe `TOOL_CALL_*` events from AG-UI; emit `ActivityStarted` and evaluate against the base SDK's `OpenBoxRuntime`.
+- **Verdict enforcement — three explicit boundaries** (not a single global gate): (1) a server tool wrapped with `bundle.serverTool()` gets real pre-execution enforcement (BLOCK/HALT/rejected-approval/CONSTRAIN prevent `execute`); (2) an explicit frontend tool gets a delivery gate (`TOOL_CALL_END` can be blocked before reaching the frontend, never a server-execution guarantee); (3) an unwrapped server tool, MCP tool, or external-agent call is observation-only. CONSTRAIN is unsupported — it always raises a typed `CopilotKitUnsupportedVerdictError` rather than being applied.
+- **Approval waiting**: `enforce`-mode evaluation awaits the base SDK's `ApprovalPoller` (`waitForDecision`) on a `REQUIRE_APPROVAL` verdict before proceeding.
 
 ### Observability Path
 
@@ -46,7 +45,7 @@
 
 ### Reliability
 
-- **Telemetry-default**: Record all events; block nothing unless `enforceApprovals: true`.
+- **Telemetry-default**: Record all events; enforcement is opt-in per boundary (`enforcement.mode`/`enforcement.frontendTools`) and, for server tools, only applies to tools explicitly wrapped with `bundle.serverTool()`.
 - **Fail-open**: Missing API credentials, timeout, or network errors → log + allow (no user impact).
 - **Idempotency**: SHA256 hash of `workflowId:runId:activityId:attempt`; safe to retry.
 
@@ -74,8 +73,8 @@
 - **Framework-specific wrapping**: No built-in React/Vue/Svelte adapters (per-framework SDKs handle that).
 - **Mastra-specific logic**: Co-runs with `@openbox-ai/openbox-mastra-sdk`; no shared span ownership.
 - **CopilotKit v1 endpoint helpers**: v2 only; v1 support deferred to future release.
-- **`constrain` applier**: Deferred to 0.4.0 (Phase 3 enforcement).
-- **`require_approval` + `halt` appliers**: Deferred to 0.5.0 (Phase 3 enforcement).
+- **`constrain` applier**: Unsupported in `0.4.0`, no committed ship date — raises an explicit typed failure at the enforcing boundaries rather than being applied. HALT and REQUIRE_APPROVAL are enforced as of `0.4.0` (not deferred).
+- **Full CONSTRAIN rewrite** (intercepting and modifying tool args pre-execution): deferred to a later release.
 
 ## Success Criteria
 

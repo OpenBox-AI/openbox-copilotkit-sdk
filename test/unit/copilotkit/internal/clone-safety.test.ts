@@ -133,7 +133,7 @@ describe("clone-safety regression — Proxy isolation, not in-place mutation", (
     );
 
     const evaluateMock = vi.fn(async (_payload: Record<string, unknown>) => null);
-    (controller.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
+    (controller.runtime.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
       evaluateMock;
 
     const afterDescriptor = Object.getOwnPropertyDescriptor(
@@ -172,7 +172,7 @@ describe("clone-safety regression — Proxy isolation, not in-place mutation", (
     );
 
     const evaluateMock = vi.fn(async (_payload: Record<string, unknown>) => null);
-    (controller.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
+    (controller.runtime.client as unknown as { evaluate: typeof evaluateMock }).evaluate =
       evaluateMock;
 
     const agents = options.agents as Record<string, AbstractAgent>;

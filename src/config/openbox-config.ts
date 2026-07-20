@@ -1,7 +1,11 @@
-import { z } from "zod";
+import { OpenBoxConfig as BaseOpenBoxConfig } from "@openbox-ai/openbox-sdk-ts/config";
+import {
+  OpenBoxAuthError as BaseOpenBoxAuthError,
+  OpenBoxConfigError as BaseOpenBoxConfigError,
+  OpenBoxInsecureURLError as BaseOpenBoxInsecureURLError
+} from "@openbox-ai/openbox-sdk-ts";
 
 import { OpenBoxClient, type OpenBoxApiErrorPolicy } from "../client/index.js";
-import { validateAgentIdentityConfig } from "../identity/index.js";
 import {
   OpenBoxAuthError,
   OpenBoxConfigError,
@@ -56,33 +60,6 @@ export interface OpenBoxConfig {
   validate: boolean;
 }
 
-const OPENBOX_CONFIG_SCHEMA = z.object({
-  agentDid: z.string().optional(),
-  agentPrivateKey: z.string().optional(),
-  apiKey: z.string().regex(API_KEY_PATTERN, {
-    message: "Invalid API key format. Expected 'obx_live_*' or 'obx_test_*'."
-  }),
-  apiUrl: z.string().min(1),
-  evaluateMaxRetries: z.number().int().nonnegative().default(2),
-  evaluateRetryBaseDelayMs: z.number().int().nonnegative().default(150),
-  governanceTimeout: z.number().nonnegative().default(30),
-  hitlEnabled: z.boolean().default(true),
-  httpCapture: z.boolean().default(true),
-  instrumentDatabases: z.boolean().default(true),
-  instrumentFileIo: z.boolean().default(false),
-  maxEvaluatePayloadBytes: z.number().int().positive().default(256_000),
-  onApiError: z.enum(["fail_open", "fail_closed"]).default("fail_open"),
-  sendActivityStartEvent: z.boolean().default(true),
-  sendStartEvent: z.boolean().default(true),
-  skipActivityTypes: z.set(z.string()).default(new Set(["send_governance_event"])),
-  skipHitlActivityTypes: z
-    .set(z.string())
-    .default(new Set(["send_governance_event"])),
-  skipSignals: z.set(z.string()).default(new Set()),
-  skipWorkflowTypes: z.set(z.string()).default(new Set()),
-  validate: z.boolean().default(true)
-});
-
 let globalConfig: OpenBoxConfig | undefined;
 
 export function validateApiKeyFormat(apiKey: string): boolean {
@@ -102,36 +79,57 @@ export function validateUrlSecurity(apiUrl: string): void {
   }
 }
 
+/**
+ * @deprecated Thin translator over the base SDK's `OpenBoxConfig.resolve()`
+ * (RT-F6/D3) — no second config-validation engine remains in this package.
+ * The core validated fields (`apiUrl`, `apiKey`, `agentDid`,
+ * `agentPrivateKey`) delegate to base for HTTPS/localhost + API-key-format +
+ * DID/key validation; the CopilotKit-specific flat fields below have no base
+ * equivalent (base's `OpenBoxConfig` nests `hitl`/`gate`/`instrumentation`
+ * groups — see `copilotkit/internal/config-translator.ts`, the translator the
+ * REAL runtime path uses) and keep their historical parsing here unchanged.
+ * `parseOpenBoxConfig`/`initializeOpenBox` are not used by
+ * `withOpenBoxRuntime`/`createOpenBoxCopilotKit` internally (verified — the
+ * runtime path resolves config via `resolveCopilotKitBaseConfig` directly);
+ * kept as a deprecated standalone helper for one release. Removed at `1.0.0`.
+ */
 export function parseOpenBoxConfig(
   input: OpenBoxConfigInput = {},
   env: NodeJS.ProcessEnv = process.env
 ): OpenBoxConfig {
+  const onApiError =
+    input.onApiError ?? parsePolicy(env.OPENBOX_GOVERNANCE_POLICY, "fail_open");
   const apiUrl = input.apiUrl ?? env.OPENBOX_URL;
-  const apiKey = input.apiKey ?? env.OPENBOX_API_KEY;
-  const agentIdentity = parseAgentIdentityConfig(
-    input.agentDid ?? env.OPENBOX_AGENT_DID,
+  const agentDid = normalizeOptionalString(
+    input.agentDid ?? env.OPENBOX_AGENT_DID
+  );
+  const agentPrivateKey = normalizeOptionalString(
     input.agentPrivateKey ?? env.OPENBOX_AGENT_PRIVATE_KEY
   );
 
-  if (!apiUrl || !apiKey) {
-    throw new OpenBoxConfigError(
-      "Missing OpenBox configuration. Both OPENBOX_URL and OPENBOX_API_KEY are required."
-    );
+  let resolved: BaseOpenBoxConfig;
+  try {
+    resolved = BaseOpenBoxConfig.resolve({
+      environ: env,
+      ...(apiUrl !== undefined ? { apiUrl } : {}),
+      ...(input.apiKey !== undefined ? { apiKey: input.apiKey } : {}),
+      ...(agentDid !== undefined ? { agentDid } : {}),
+      ...(agentPrivateKey !== undefined ? { agentPrivateKey } : {})
+    });
+    // Base's own `normalized()` format-checks the DID but does not decode
+    // the private key; eagerly load the identity too so a malformed key
+    // throws HERE — matching this function's historical eager-validation
+    // behavior (the returned `AgentIdentity` itself is discarded).
+    resolved.loadIdentity();
+  } catch (err) {
+    throw toAdapterConfigError(err);
   }
 
-  if (!validateApiKeyFormat(apiKey)) {
-    throw new OpenBoxAuthError(
-      "Invalid API key format. Expected 'obx_live_*' or 'obx_test_*'."
-    );
-  }
-
-  validateUrlSecurity(apiUrl);
-
-  const parsed = OPENBOX_CONFIG_SCHEMA.parse({
-    agentDid: agentIdentity?.did,
-    agentPrivateKey: agentIdentity?.privateKey,
-    apiKey,
-    apiUrl: apiUrl.replace(/\/+$/, ""),
+  return {
+    agentDid: resolved.agentDid ?? undefined,
+    agentPrivateKey: resolved.agentPrivateKey ?? undefined,
+    apiKey: resolved.apiKey,
+    apiUrl: resolved.apiUrl,
     evaluateMaxRetries:
       input.evaluateMaxRetries ??
       parseInteger(env.OPENBOX_EVALUATE_MAX_RETRIES, 2),
@@ -150,9 +148,7 @@ export function parseOpenBoxConfig(
     maxEvaluatePayloadBytes:
       input.maxEvaluatePayloadBytes ??
       parseInteger(env.OPENBOX_MAX_EVALUATE_PAYLOAD_BYTES, 256_000),
-    onApiError:
-      input.onApiError ??
-      parsePolicy(env.OPENBOX_GOVERNANCE_POLICY, "fail_open"),
+    onApiError,
     sendActivityStartEvent:
       input.sendActivityStartEvent ??
       parseBoolean(env.OPENBOX_SEND_ACTIVITY_START_EVENT, true),
@@ -170,15 +166,10 @@ export function parseOpenBoxConfig(
       iterableToSet(input.skipWorkflowTypes) ??
       parseCsvSet(env.OPENBOX_SKIP_WORKFLOW_TYPES),
     validate: input.validate ?? parseBoolean(env.OPENBOX_VALIDATE, true)
-  });
-
-  return {
-    ...parsed,
-    agentDid: agentIdentity?.did,
-    agentPrivateKey: agentIdentity?.privateKey
   };
 }
 
+/** @deprecated See `parseOpenBoxConfig`. Removed at `1.0.0`. */
 export async function initializeOpenBox(
   input: OpenBoxConfigInput = {}
 ): Promise<OpenBoxConfig> {
@@ -209,27 +200,29 @@ export function setOpenBoxConfig(config: OpenBoxConfig): void {
   globalConfig = config;
 }
 
-function parseAgentIdentityConfig(
-  agentDidValue: string | undefined,
-  agentPrivateKeyValue: string | undefined
-): { did: string; privateKey: string } | undefined {
-  const agentDid = normalizeOptionalString(agentDidValue);
-  const agentPrivateKey = normalizeOptionalString(agentPrivateKeyValue);
+/**
+ * Base's `OpenBoxConfig.resolve()`/`.loadIdentity()` throw base's OWN error
+ * classes (`@openbox-ai/openbox-sdk-ts`). Re-thrown as this package's
+ * equivalent so `instanceof` checks against this package's exported error
+ * classes keep working for existing callers of `parseOpenBoxConfig` (only the
+ * message wording, sourced from base, changes).
+ */
+function toAdapterConfigError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error);
 
-  if (!agentDid && !agentPrivateKey) {
-    return undefined;
+  if (error instanceof BaseOpenBoxInsecureURLError) {
+    return new OpenBoxInsecureURLError(message);
   }
 
-  if (!agentDid || !agentPrivateKey) {
-    throw new OpenBoxConfigError(
-      "Both OPENBOX_AGENT_DID and OPENBOX_AGENT_PRIVATE_KEY are required when configuring OpenBox agent identity."
-    );
+  if (error instanceof BaseOpenBoxAuthError) {
+    return new OpenBoxAuthError(message);
   }
 
-  return validateAgentIdentityConfig({
-    did: agentDid,
-    privateKey: agentPrivateKey
-  });
+  if (error instanceof BaseOpenBoxConfigError) {
+    return new OpenBoxConfigError(message);
+  }
+
+  return error instanceof Error ? error : new OpenBoxConfigError(message);
 }
 
 function normalizeOptionalString(value: string | undefined): string | undefined {

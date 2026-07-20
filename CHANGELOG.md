@@ -4,6 +4,48 @@
 
 - No changes yet.
 
+## 0.4.0 — 2026-07-17
+
+Full migration onto `@openbox-ai/openbox-sdk-ts` as the base runtime. See [`MIGRATION.md`](./MIGRATION.md) for the complete adopter-facing writeup; summary below.
+
+### Breaking
+
+- Removed the package-root `src/verdict/*` exports (`applyVerdict`, `mapVerdict`, `OpenBoxVerdictSchema`, `OpenBoxConstraintSchema`, `OpenBoxReplacementSchema`, `VerdictMappingError`, `VerdictNotImplementedError`, and the related `OpenBoxVerdict`/`OpenBoxConstraint`/`OpenBoxReplacement`/`Applier*` types). Never wired into real enforcement; `applyVerdict` unconditionally threw for every verdict but `allow`/`block`. The base SDK's `Verdict`/`EvaluationResult` are canonical now.
+
+### Added
+
+- `createOpenBoxCopilotKit(options)` bundle + `bundle.serverTool(tool)` — wraps a server-side tool so a non-allow governance verdict (BLOCK/HALT/rejected-or-expired-or-timed-out approval/CONSTRAIN) prevents `execute` from ever running; an approved call executes exactly once. The one supported pre-execution enforcement seam in this SDK.
+- Real `REQUIRE_APPROVAL` waiting: `enforce`-mode evaluation now awaits the base `ApprovalPoller` (`waitForDecision`) instead of passing the verdict through unresolved.
+- Explicit `CopilotKitUnsupportedVerdictError` for CONSTRAIN (and any future non-actionable verdict) at the enforcing boundaries (frontend gate, `serverTool()`) — raised before delivery/execution, never a silent allow.
+- Truthful interrupt/resume semantics: an interrupt emits `copilotkit_interrupt` and stays pending (no fabricated completion); resume correlates on the interrupt's own `id`; resume-with-no-pending-interrupt is a typed failure. New injectable `InterruptPersistencePort` (bundled `InMemoryInterruptStore` is explicitly non-durable).
+- Non-blocking, bounded telemetry queue — AG-UI events forward without awaiting Core even in telemetry-only mode (previously serial `await client.evaluate()` per event throttled the stream to Core latency).
+- Opt-in base instrumentation (`middlewareOptions.instrumentation`, off by default) and opt-in startup API-key validation (`validateApiKeyAtStartup`, default `false` — no new default network call).
+- New `telemetry.*` bounded-queue config options (`maxPendingEvents`, `maxConcurrentSends`, `flushTimeoutMs`, `overflowPolicy`, `maxPayloadBytes`).
+- `scripts/check-no-duplicate-signing.mjs` — CI guard against a second Core-endpoint/signing implementation appearing in production `src/` outside the base-delegating facades. Wired into `ci:check`.
+
+### Changed
+
+- `middlewareOptions.enforceApprovals` (boolean) is deprecated in favor of `middlewareOptions.enforcement` (`OpenBoxEnforcementOptions`); it still works but now maps to frontend-tool-gate enforcement only, plus a one-time warning that server tools are not covered by it. It was never universal server-tool enforcement, in this release or before.
+- `RUN_FINISHED.outcome` is modeled explicitly; an interrupt outcome no longer emits a successful `ActivityCompleted`/`WorkflowCompleted`.
+- Multi-agent handoff now goes through the base `handoff()` factory (two-field payload; Core derives the receiver from child-signed headers). The default session-id prefix stays `mas:${runId}` (unchanged from `0.3.0`) so the CopilotKit parent and the OpenBox Mastra child, which derive the id from the same forwarded run id, land in one multi-agent session. Wire `source` on the handoff is now the base default (`"workflow-telemetry"`) — every other event type still stamps its own `source`.
+- `./client`, `./config`, `./identity`, `./types` subpaths are now thin, base-delegating shims (documented deprecated, removed at `1.0.0`).
+- Every `OpenBoxConfigInput` field ever accepted keeps working; deprecated fields now warn once per field name, per process, pointing at their base-SDK replacement (see `MIGRATION.md`'s alias table).
+
+### Fixed
+
+- **B1** — a server tool call could no longer be assumed blocked just because the AG-UI event was blocked; `serverTool()` closes this gap for wrapped tools, and docs now state the observation-only boundary explicitly for unwrapped/MCP/external calls.
+- **B2** — `REQUIRE_APPROVAL` now actually waits for a decision instead of passing through.
+- **B3** — an interrupted run no longer reports a successful activity/workflow completion.
+- **B4** — telemetry-only mode no longer serially blocks the AG-UI stream on Core latency.
+
+### Documentation
+
+- `MIGRATION.md`, `README.md`, and `docs/*.md` updated to remove the implication that blocking an AG-UI event universally prevents a server-side side effect; document the three enforcement boundaries (wrapped server tool / frontend delivery gate / observation-only); state CONSTRAIN is unsupported in `0.4.0`.
+
+### Notes
+
+- `@openbox-ai/openbox-sdk-ts` is consumed from npm, exact-pinned at `1.0.1` (no caret — the base SDK now owns all signing/auth/verdict logic, so it is deliberately pinned rather than range-matched). The `npm publish` of this package itself remains the maintainer-owned next step (see `MIGRATION.md`'s release checklist).
+
 ## 0.3.0 — 2026-06-30
 
 ### Added — verdict surface (Phase 1)

@@ -1,5 +1,14 @@
-import type { OpenBoxClient } from "../client/openbox-client.js";
+import type { OpenBoxRuntime } from "@openbox-ai/openbox-sdk-ts/runtime";
+
 import type { SpanBuffer } from "../spans/span-buffer.js";
+
+import type { ChildAgentClientCache } from "./internal/child-agent-client-cache.js";
+import type { OpenBoxInstrumentationOptions } from "./internal/instrumentation.js";
+import type { InterruptPersistencePort } from "./internal/interrupt-store.js";
+import type { RunContextStore } from "./internal/run-context-store.js";
+import type { RunTerminalStateRegistry } from "./internal/run-terminal-state.js";
+import type { ServerToolOwnershipRegistry } from "./internal/server-tool-ownership.js";
+import type { LifecycleTelemetryQueue, TelemetryQueueOptions } from "./lifecycle-telemetry.js";
 
 /**
  * Lightweight logger contract. Module-local; matches a console-style surface
@@ -23,11 +32,91 @@ export interface OpenBoxRuntimeDefaults {
   workflowType?: string | undefined;
 }
 
-/** Wire-level dependencies attached to an OpenBox-wrapped CopilotRuntime. */
+/**
+ * Wire-level dependencies attached to an OpenBox-wrapped CopilotRuntime.
+ *
+ * `runtime` is the ONE base `OpenBoxRuntime` this controller owns (config,
+ * client, adapter, and the base per-runtime `ContextStore` all live on it —
+ * see `internal/base-runtime-builder.ts`). `runContext` is a SEPARATE,
+ * small, controller-owned per-run store (Decision D7) — do not conflate the
+ * two. `telemetryQueue` is the ONE bounded, non-blocking telemetry sender
+ * (Phase 3, fixes B4) this controller owns — constructed once alongside
+ * `runtime` so cross-run concurrency/pending bounds apply across every
+ * request this controller serves, never per-middleware-instance.
+ * `serverToolOwnership` is a run-scoped `(runId, toolCallId)` registry
+ * the server-tool wrapper (Phase 5) claims to suppress a duplicate AG-UI
+ * observation for the same call. `interruptStore` is the MANDATORY
+ * injectable pending-interrupt persistence port (RT-F9/P2-10) — the
+ * in-memory default is documented as non-durable, never a process-global.
+ * `runTerminalState` is the per-run output-dedup/interrupted registry
+ * (RT-F14) shared by the AG-UI middleware and `internal/after-request.ts`.
+ * `childAgentClients` is the cache of child-scoped base clients multi-agent
+ * Handoff emission signs with (RT-F10) — one instance per controller, closed
+ * by bundle/runtime shutdown and drained per-run on that run's terminal path.
+ */
 export interface OpenBoxRuntimeController {
-  client: OpenBoxClient;
+  runtime: OpenBoxRuntime;
+  runContext: RunContextStore;
+  telemetryQueue: LifecycleTelemetryQueue;
   defaults: OpenBoxRuntimeDefaults;
   logger: OpenBoxLogger;
+  serverToolOwnership: ServerToolOwnershipRegistry;
+  interruptStore: InterruptPersistencePort;
+  runTerminalState: RunTerminalStateRegistry;
+  childAgentClients: ChildAgentClientCache;
+}
+
+/**
+ * Explicit enforcement model (proposal §7.3) replacing the ambiguous
+ * `enforceApprovals` boolean. Governs TWO independent boundaries — see the
+ * Boundaries table in `plans/260716-1509-openbox-sdk-ts-adoption/phase-05-explicit-server-tool-governance.md`:
+ *
+ *   - Wrapped `BuiltInAgent` server tools (`bundle.serverTool()`, see
+ *     `server-tool.ts`): `mode: "enforce"` runs the base
+ *     `OpenBoxRuntime.evaluateLifecycle()` gate BEFORE the tool's real
+ *     `execute` runs — BLOCK/HALT/a rejected-or-expired-or-timed-out approval/
+ *     CONSTRAIN all prevent `execute` from ever running, and the wrapper
+ *     THROWS (server tools surface errors to their caller; there is no AG-UI
+ *     stream frame to redact into). `mode: "telemetry"` (default) never
+ *     gates: `execute` always runs, and ActivityStarted/Completed telemetry
+ *     is recorded best-effort (a missing per-run correlation is marked
+ *     `generated` rather than silently omitted).
+ *   - The frontend AG-UI `TOOL_CALL_END` gate (`frontendTools`): independent
+ *     of `mode` by default it FOLLOWS `mode`, but can diverge (e.g. enforce
+ *     server tools while only observing frontend/browser tool calls).
+ *
+ * `unwrappedServerTools` intentionally has NO `"enforce"` value: a server
+ * tool never passed through `bundle.serverTool()` has no pre-execution seam
+ * this SDK can hook (no wrapped `execute`), so it is ALWAYS observation-only
+ * — this field documents that boundary in types rather than toggling any
+ * behavior.
+ */
+export interface OpenBoxEnforcementOptions {
+  /** Governs wrapped server tools (`bundle.serverTool()`). Default `"telemetry"`. */
+  mode?: "telemetry" | "enforce";
+  /** Governs the frontend AG-UI `TOOL_CALL_END` gate. Default: follows `mode`. */
+  frontendTools?: "observe" | "enforce";
+  /**
+   * Documents that an unwrapped server tool / MCP tool / external-agent call
+   * is always observation-only. No `"enforce"` value exists for this seam —
+   * see the interface doc above.
+   */
+  unwrappedServerTools?: "observe";
+  /**
+   * HITL approval poll interval. Default `5_000`ms — matches the base
+   * `ApprovalPoller`'s own default exactly, so this is a no-op today: wiring
+   * a NON-default value through to the live poller requires constructing it
+   * inside `internal/base-runtime-builder.ts`'s composition root, which is
+   * out of this phase's scope (tracked as a follow-up, not silently dropped).
+   */
+  approvalPollIntervalMs?: number;
+  /**
+   * Bounds an in-flight HITL approval wait; explicit `null` opts into an
+   * infinite wait. Default `900_000` (15 min). Mirrors
+   * `CreateOpenBoxCopilotKitOptions.approvalMaxWaitMs` (that field wins when
+   * both are set on `createOpenBoxCopilotKit`).
+   */
+  approvalMaxWaitMs?: number | null;
 }
 
 /**
@@ -44,7 +133,23 @@ export interface OpenBoxRuntimeController {
  * single-agent governance is unchanged unless `multiAgent.enabled` is set.
  */
 export interface OpenBoxMiddlewareOptions {
+  /**
+   * @deprecated Replaced by `enforcement` (`OpenBoxEnforcementOptions`) —
+   * removed in `1.0.0`. `false` (the default) behaves like
+   * `enforcement: { mode: "telemetry" }`. `true` behaves like
+   * `enforcement: { frontendTools: "enforce" }` ONLY — the frontend AG-UI
+   * `TOOL_CALL_END` gate — plus a one-time runtime warning that server tools
+   * are NOT covered by this flag (wrap them explicitly via
+   * `bundle.serverTool()`). NEVER treated as universal server-tool
+   * enforcement. When both `enforceApprovals` and `enforcement.frontendTools`
+   * are set, `enforcement.frontendTools` wins.
+   */
   enforceApprovals?: boolean;
+  /**
+   * Explicit enforcement model (replaces `enforceApprovals`). See
+   * `OpenBoxEnforcementOptions`.
+   */
+  enforcement?: OpenBoxEnforcementOptions;
   frontendToolNames?: string[];
   isFrontendTool?: (call: { name: string }) => boolean;
   multiAgent?: OpenBoxMultiAgentOptions;
@@ -62,8 +167,30 @@ export interface OpenBoxMiddlewareOptions {
   /**
    * Optional JSONPath-like paths to redact from tool args/result previews.
    * Recommended starter set: `["$..password", "$..secret", "$..token", "$..apiKey"]`.
+   * Applied both as a precise CopilotKit-side redactor on raw activity/signal
+   * fields AND translated into the base gate's key-name `redactKeys` (RT-F2).
    */
   redactPaths?: string[];
+  /**
+   * Bounded, non-blocking telemetry-queue configuration (fixes B4). Read ONCE
+   * — at the first `createOpenBoxMiddleware`/`withOpenBoxRuntime` call that
+   * builds this controller's `telemetryQueue` (see `internal/base-runtime-builder.ts`);
+   * the queue is a single instance shared by every run this controller
+   * serves, so a later `createOpenBoxMiddleware` call on the SAME controller
+   * cannot reconfigure it. The deprecated `maxEvaluatePayloadBytes` config
+   * field (Phase 6) maps onto `maxPayloadBytes` here as a fallback only when
+   * this option doesn't already set it — see `internal/config-translator.ts`.
+   */
+  telemetry?: TelemetryQueueOptions;
+  /**
+   * Opt-in base instrumentation (Phase 6, proposal §14) — OFF by default in
+   * `0.4.0`; no target (fetch/http/https/fs/db) is ever patched unless
+   * `enabled: true` is set here. Read ONCE, same construction-time semantics
+   * as `telemetry` above (see `internal/base-runtime-builder.ts`). Shutdown
+   * always calls the installed controller's `flush()` then `shutdown()`
+   * before the runtime closes, restoring every patched global.
+   */
+  instrumentation?: OpenBoxInstrumentationOptions;
 }
 
 /**

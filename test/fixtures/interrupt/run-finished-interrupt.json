@@ -1,0 +1,24 @@
+{
+  "description": "BuiltInAgent-shaped HITL interrupt: a server tool (deleteAccount) is started but never produces a TOOL_CALL_RESULT because the run suspends awaiting approval. RUN_FINISHED carries outcome.type === 'interrupt'. Interrupt.id === toolCallId (BuiltInAgent sets them equal — this masks a toolCallId-keyed bug, hence the sibling non-builtin fixture). Pinned peers: @copilotkit/runtime 1.61.2, ai 6.0.214, @ag-ui/client 0.0.57.",
+  "events": [
+    { "type": "TOOL_CALL_START", "toolCallId": "call-approve-1", "toolCallName": "deleteAccount" },
+    { "type": "TOOL_CALL_ARGS", "toolCallId": "call-approve-1", "delta": "{\"userId\":\"u1\"}" },
+    { "type": "TOOL_CALL_END", "toolCallId": "call-approve-1" },
+    {
+      "type": "RUN_FINISHED",
+      "threadId": "thread-1",
+      "runId": "run-1",
+      "outcome": {
+        "type": "interrupt",
+        "interrupts": [
+          {
+            "id": "call-approve-1",
+            "reason": "approval_required",
+            "message": "Approve deleteAccount for u1?",
+            "toolCallId": "call-approve-1"
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,3 +1,15 @@
+import { createHash, randomUUID } from "node:crypto";
+
+import {
+  AgentIdentity,
+  buildCanonicalString,
+  HEADER_BODY_SHA256,
+  HEADER_DID,
+  HEADER_NONCE,
+  HEADER_SIGNATURE,
+  HEADER_TIMESTAMP
+} from "@openbox-ai/openbox-sdk-ts/identity";
+
 import {
   GovernanceAPIError,
   GovernanceVerdictResponse,
@@ -5,11 +17,6 @@ import {
   OpenBoxConfigError,
   OpenBoxNetworkError
 } from "../types/index.js";
-import {
-  createAgentIdentityHeaders,
-  type AgentIdentityConfig,
-  validateAgentIdentityConfig
-} from "../identity/index.js";
 
 export type OpenBoxApiErrorPolicy = "fail_open" | "fail_closed";
 
@@ -54,7 +61,10 @@ export class OpenBoxClient {
 
   readonly #fetch: typeof fetch;
   readonly #debugEnabled: boolean;
-  readonly #agentIdentity: AgentIdentityConfig | undefined;
+  // Base's loaded, validated `AgentIdentity` (Ed25519 signer) — never the
+  // adapter's own duplicated crypto (RT-F6/D3). `undefined` when no DID
+  // identity is configured.
+  readonly #agentIdentity: AgentIdentity | undefined;
 
   public constructor({
     agentDid,
@@ -81,7 +91,7 @@ export class OpenBoxClient {
     this.timeoutSeconds = timeoutSeconds;
     this.#fetch = customFetch ?? fetch;
     this.#debugEnabled = isOpenBoxDebugEnabled();
-    this.#agentIdentity = agentIdentity;
+    this.#agentIdentity = agentIdentity?.identity;
   }
 
   public async validateApiKey(): Promise<void> {
@@ -226,15 +236,30 @@ export class OpenBoxClient {
       return headers;
     }
 
+    // Signing seam (RT-F13): validation/key-loading/signing all live in base
+    // `AgentIdentity` — never `prepareSignedRequest`/`serializeBody`, which
+    // would re-serialize `body` (already a finished JSON string here) instead
+    // of hashing the exact bytes being sent. Nonce/timestamp generation stays
+    // adapter-owned so the wire values are unchanged from this client's prior
+    // fully-local implementation.
+    const timestamp = new Date().toISOString();
+    const nonce = randomUUID();
+    const bodySha256 = createHash("sha256").update(body).digest("hex");
+    const canonical = buildCanonicalString(
+      method,
+      pathname,
+      timestamp,
+      nonce,
+      bodySha256
+    );
+
     return {
       ...headers,
-      ...createAgentIdentityHeaders({
-        body,
-        did: this.#agentIdentity.did,
-        method,
-        pathname,
-        privateKey: this.#agentIdentity.privateKey
-      })
+      [HEADER_DID]: this.#agentIdentity.agentDid,
+      [HEADER_TIMESTAMP]: timestamp,
+      [HEADER_NONCE]: nonce,
+      [HEADER_BODY_SHA256]: bodySha256,
+      [HEADER_SIGNATURE]: this.#agentIdentity.sign(canonical)
     };
   }
 
@@ -374,10 +399,18 @@ function isOpenBoxDebugEnabled(): boolean {
   return value === "1" || value === "true" || value === "yes";
 }
 
+/**
+ * Validates + loads the optional DID identity via base's
+ * `AgentIdentity.fromPrivateKey` (RT-F6/D3 — no second signer). Base
+ * validation errors are re-thrown as this package's own `OpenBoxConfigError`
+ * so `instanceof` checks against this package's exported error class keep
+ * working for existing callers; only the message wording (sourced from base)
+ * changes.
+ */
 function parseOptionalAgentIdentityConfig(
   agentDidValue: string | undefined,
   agentPrivateKeyValue: string | undefined
-): AgentIdentityConfig | undefined {
+): { did: string; identity: AgentIdentity; privateKey: string } | undefined {
   const agentDid = normalizeOptionalString(agentDidValue);
   const agentPrivateKey = normalizeOptionalString(agentPrivateKeyValue);
 
@@ -391,10 +424,14 @@ function parseOptionalAgentIdentityConfig(
     );
   }
 
-  return validateAgentIdentityConfig({
-    did: agentDid,
-    privateKey: agentPrivateKey
-  });
+  try {
+    const identity = AgentIdentity.fromPrivateKey(agentDid, agentPrivateKey);
+    return { did: agentDid, identity, privateKey: agentPrivateKey };
+  } catch (err) {
+    throw new OpenBoxConfigError(
+      err instanceof Error ? err.message : String(err)
+    );
+  }
 }
 
 function normalizeOptionalString(value: string | undefined): string | undefined {

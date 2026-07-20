@@ -1,0 +1,21 @@
+[project]
+name = "sample-agent"
+version = "0.1.0"
+description = "A LangGraph agent"
+requires-python = ">=3.12"
+dependencies = [
+  "langchain==1.2.15",
+  "langgraph==1.1.6",
+  "langsmith>=0.8.18,<1.0.0",
+  "openai==1.109.1",
+  "fastapi>=0.115.5,<1.0.0",
+  "uvicorn>=0.29.0,<1.0.0",
+  "python-dotenv>=1.0.0,<2.0.0",
+  "langchain-openai==1.1.9",
+  "copilotkit==0.1.94",
+  "ag-ui-langgraph[fastapi]==0.0.41",
+  "ag-ui-protocol==0.1.18",
+  "pip>=26.0.1",
+  "langchain-anthropic==1.4.1",
+  "openbox-langgraph-sdk-python>=1.0.0",
+]

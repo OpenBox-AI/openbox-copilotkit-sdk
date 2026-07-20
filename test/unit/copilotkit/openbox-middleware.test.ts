@@ -218,6 +218,15 @@ describe("OpenBoxMiddleware.run", () => {
   });
 
   it("injects a redacted governance_blocked RUN_ERROR when enforceApprovals: true and verdict is block", async () => {
+    // The enforce gate routes through the base `OpenBoxRuntime.evaluateLifecycle()`
+    // (Phase 4b): a BLOCK verdict is raised by the stock `CoreAdapter` as a base
+    // `GovernanceBlockedError` constructed from `result.verdict`/`result.reason`
+    // ONLY — it carries no `governance_event_id`/`approval_id` (verified:
+    // `openbox-sdk-ts@1.0.1` `errors/index.ts`/`adapters/base.ts`). The gate's
+    // correlationId fallback for a THROWN base error is therefore `"unknown"`,
+    // same fallback `resolveCorrelationId` already used for a missing id
+    // pre-migration — this is a real (and intentionally redaction-safe, since
+    // `"unknown"` leaks nothing) behavior change, not a bug.
     const blockingVerdict = GovernanceVerdictResponse.fromObject({
       governance_event_id: "evt-block-42",
       reason: "tool denied for tenant acme",
@@ -246,11 +255,12 @@ describe("OpenBoxMiddleware.run", () => {
       type: string;
     };
     expect(err.code).toBe(GOVERNANCE_BLOCKED_ERROR_CODE);
-    expect(err.correlationId).toBe("evt-block-42");
+    expect(err.correlationId).toBe("unknown");
     const serialized = JSON.stringify(err);
     expect(serialized).not.toContain("setThemeColor");
     expect(serialized).not.toContain("acme");
     expect(serialized).not.toContain("denied");
+    expect(serialized).not.toContain("evt-block-42");
   });
 
   it("continues the stream when client.evaluate throws (fail-open)", async () => {

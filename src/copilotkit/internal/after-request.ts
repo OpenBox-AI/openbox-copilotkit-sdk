@@ -85,15 +85,36 @@ export function openBoxAfterRequest(
 
   return async (params) => {
     try {
+      const runId = params.runId;
+
+      // RT-F14 dedup guard: this hook is a FALLBACK for when the AG-UI
+      // stream itself produced no terminal output signal. Read + release
+      // this run's dedup entry UNCONDITIONALLY (before any early return
+      // below) — this registry's last consumer is always `after-request` in
+      // a request's lifecycle, so it must release the entry regardless of
+      // whether there is a final message to report, or memory would leak
+      // for every run that hits an early return.
+      const terminalState = runId ? controller.runTerminalState.get(runId) : undefined;
+      if (runId) {
+        controller.runTerminalState.clearRun(runId);
+      }
+
       const message = findFinalAssistantMessage(params.messages);
       if (!message) {
         return;
       }
 
       const workflowId = params.threadId;
-      const runId = params.runId;
       if (!workflowId || !runId) {
         // Without both ids this hook cannot attach the signal to a workflow.
+        return;
+      }
+
+      // Skip emission when the middleware already emitted `agent_output`
+      // (normal successful run — never double-emit `assistant_message`) OR
+      // when the run ended suspended (an interrupt outcome — the run is not
+      // done, so there is no "final" assistant message to report yet).
+      if (terminalState?.outputEmitted || terminalState?.interrupted) {
         return;
       }
 

@@ -1,10 +1,21 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { OpenBoxClient } from "../../../src/client/openbox-client.js";
+import type { OpenBoxClient } from "@openbox-ai/openbox-sdk-ts/client";
+
 import { OpenBoxCopilotKitEmitter } from "../../../src/copilotkit/openbox-emitter.js";
 import { WorkflowEventType } from "../../../src/types/workflow-event-type.js";
 
-import { buildController } from "./test-utils.js";
+import { buildController, flushMacrotask } from "./test-utils.js";
+
+// Phase 3b (B4 fix): the six lifecycle/signal methods below are pure
+// telemetry — they enqueue on the bounded, non-blocking queue and return
+// before the send reaches `client.evaluate`. `flushMacrotask()` lets that
+// background send settle before a test inspects `evaluateMock`; every
+// PAYLOAD-SHAPE assertion (the actual thing these tests guard) is unchanged.
+// `emitActivityCompletedHook` is unaffected (still a direct, unmigrated
+// path — see openbox-emitter.ts) and needs no flush. `emitHandoff` (Phase 5)
+// is also direct/unqueued, but its WIRE send is now the base `handoff()`
+// factory's two-field envelope — see the dedicated tests below.
 
 const FROZEN_REQUIRED_KEYS = [
   "source",
@@ -39,6 +50,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       userInput: { content: "Hi", role: "user" },
       workflowId: "thread-A"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -59,6 +71,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       signalName: "agent_output",
       workflowId: "thread-B"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -80,6 +93,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       toolOrigin: "copilotkit-observed",
       workflowId: "thread-C"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -89,6 +103,44 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
     expect(payload.activity_type).toBe("setThemeColor");
     expect(payload.tool_origin).toBe("copilotkit-observed");
     expect(payload.frontend).toBe(true);
+  });
+
+  it("prepareActivityStartedForEnforcement builds the envelope + notifies onEvent WITHOUT calling evaluate (Phase 4b)", () => {
+    const onEvent = vi.fn();
+    const { controller, evaluateMock } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, onEvent);
+
+    const envelope = emitter.prepareActivityStartedForEnforcement({
+      activityArgs: { amount: 100 },
+      activityId: "call-enforce-1",
+      frontend: true,
+      runId: "run-G",
+      toolName: "sendPayment",
+      toolOrigin: "copilotkit-observed",
+      workflowId: "thread-G"
+    });
+
+    // Never sends/evaluates itself — the caller hands the returned envelope
+    // to `OpenBoxRuntime.evaluateLifecycle()`, the ONE place it reaches Core.
+    expect(evaluateMock).not.toHaveBeenCalled();
+
+    // The RAW envelope carries the ids `evaluateLifecycle`'s approval-poll
+    // correlation and HALT-scoping both read (`activityId` top-level,
+    // `workflow_id`/`run_id` in the flat payload).
+    expect(envelope.activityId).toBe("call-enforce-1");
+    expect(envelope.payload.workflow_id).toBe("thread-G");
+    expect(envelope.payload.run_id).toBe("run-G");
+    expect(envelope.payload.activity_input).toEqual({ amount: 100 });
+
+    // `onEvent` still fires synchronously with the PREPARED (wire-shaped)
+    // payload, for observability — same shape the other lifecycle methods use.
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    const arg = onEvent.mock.calls[0]?.[0] as {
+      eventType: string;
+      payload: Record<string, unknown>;
+    };
+    expect(arg.eventType).toBe(WorkflowEventType.ACTIVITY_STARTED);
+    expect(arg.payload.activity_id).toBe("call-enforce-1");
   });
 
   it("emitActivityCompleted includes status, duration_ms, start_time, end_time", async () => {
@@ -107,6 +159,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       toolName: "setThemeColor",
       workflowId: "thread-C"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -128,6 +181,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       runId: "run-D",
       workflowId: "thread-D"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
@@ -135,7 +189,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
     expect(payload.workflow_output).toBe("the answer is 42");
   });
 
-  it("emitWorkflowFailed carries the error record", async () => {
+  it("emitWorkflowFailed carries the error record, converted to base ErrorInfo", async () => {
     const { controller, evaluateMock } = buildController();
     const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
 
@@ -144,11 +198,19 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       runId: "run-E",
       workflowId: "thread-E"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     assertCanonicalEnvelope(payload);
     expect(payload.event_type).toBe(WorkflowEventType.WORKFLOW_FAILED);
-    expect(payload.error).toEqual({ code: "boom", message: "explosion" });
+    // Base ErrorInfo requires `type` (never a bare string) — `code` has no
+    // dedicated ErrorInfo slot, so it falls back to `type` and is ALSO kept
+    // verbatim (existing readers of `error.code` keep working).
+    expect(payload.error).toEqual({
+      code: "boom",
+      message: "explosion",
+      type: "boom"
+    });
   });
 
   it("notifies the onEvent observer with eventType and payload", async () => {
@@ -183,6 +245,7 @@ describe("OpenBoxCopilotKitEmitter payload shape", () => {
       threadId: "thread-F",
       workflowId: "thread-F"
     });
+    await flushMacrotask();
 
     expect(result).toBeNull();
     expect(logger.warn).toHaveBeenCalled();
@@ -205,6 +268,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       signalName: "user_input",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.signal_args).toEqual(["what is the weather in tokyo?"]);
@@ -220,6 +284,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       signalName: "user_input",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.signal_args).toEqual({ value: "hello" });
@@ -235,6 +300,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       threadId: "thread-X",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.multi_agent_session_id).toBe("mas:run-X");
@@ -249,6 +315,7 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       threadId: "thread-X",
       workflowId: "thread-X"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload).not.toHaveProperty("multi_agent_session_id");
@@ -265,13 +332,14 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
       runId: "run-X",
       workflowId: "child-wf"
     });
+    await flushMacrotask();
 
     const payload = evaluateMock.mock.calls[0]?.[0] as Record<string, unknown>;
     expect(payload.multi_agent_session_id).toBe("mas:run-X");
     expect(payload.parent_workflow_id).toBe("parent-wf");
   });
 
-  it("emitHandoff routes to the child-scoped client with the required fields", async () => {
+  it("emitHandoff sends the child-scoped client ONLY the base two-field envelope (D1)", async () => {
     const { controller, evaluateMock } = buildController();
     const emitter = new OpenBoxCopilotKitEmitter(controller, undefined);
     const childEvaluate = vi.fn().mockResolvedValue(null);
@@ -295,10 +363,47 @@ describe("OpenBoxCopilotKitEmitter multi-agent fields", () => {
     expect(payload.event_type).toBe(WorkflowEventType.HANDOFF);
     expect(payload.from_agent_did).toBe("did:aip:parent");
     expect(payload.multi_agent_session_id).toBe("mas:run-X");
-    expect(payload.workflow_type).toBe("copilotkit");
-    expect(payload.task_queue).toBe("copilotkit");
+    // D1: the base `handoff()` factory carries ONLY the two required fields —
+    // the rich adapter metadata this method historically sent no longer
+    // rides the WIRE at all (it still reaches `onEvent`, see the next test).
+    expect(payload).not.toHaveProperty("workflow_type");
+    expect(payload).not.toHaveProperty("task_queue");
+    expect(payload).not.toHaveProperty("metadata");
+    expect(payload).not.toHaveProperty("run_id");
+    expect(payload).not.toHaveProperty("workflow_id");
+  });
+
+  it("emitHandoff still surfaces the rich adapter metadata via onEvent even when sent to a child", async () => {
+    const onEvent = vi.fn();
+    const { controller } = buildController();
+    const emitter = new OpenBoxCopilotKitEmitter(controller, onEvent);
+    const childClient = {
+      evaluate: vi.fn().mockResolvedValue(null)
+    } as unknown as OpenBoxClient;
+
+    await emitter.emitHandoff(
+      {
+        fromAgentDid: "did:aip:parent",
+        metadata: { delegate_tool_name: "weatherTool" },
+        multiAgentSessionId: "mas:run-X",
+        runId: "run-X",
+        workflowId: "thread-X"
+      },
+      childClient
+    );
+
+    expect(onEvent).toHaveBeenCalledTimes(1);
+    const arg = onEvent.mock.calls[0]?.[0] as {
+      eventType: string;
+      payload: Record<string, unknown>;
+    };
+    expect(arg.eventType).toBe(WorkflowEventType.HANDOFF);
+    expect(arg.payload.from_agent_did).toBe("did:aip:parent");
+    expect(arg.payload.multi_agent_session_id).toBe("mas:run-X");
+    expect(arg.payload.workflow_type).toBe("copilotkit");
+    expect(arg.payload.task_queue).toBe("copilotkit");
     expect(
-      (payload.metadata as Record<string, unknown>).delegate_tool_name
+      (arg.payload.metadata as Record<string, unknown>).delegate_tool_name
     ).toBe("weatherTool");
   });
 

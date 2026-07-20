@@ -1,10 +1,16 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+
+import {
+  AgentIdentity,
+  buildCanonicalString,
+  HEADER_BODY_SHA256,
+  HEADER_DID,
+  HEADER_NONCE,
+  HEADER_SIGNATURE,
+  HEADER_TIMESTAMP
+} from "@openbox-ai/openbox-sdk-ts/identity";
 
 import { enterOpenBoxExecutionContext } from "../../governance/context.js";
-import {
-  createAgentIdentityHeaders,
-  type AgentIdentityHeaders
-} from "../../identity/agent-identity.js";
 import { getOpenBoxRuntime } from "../runtime-symbol.js";
 import type { OpenBoxRuntimeController } from "../types.js";
 
@@ -142,19 +148,43 @@ export function openBoxBeforeRequest(
       return undefined;
     }
 
-    let identityHeaders: AgentIdentityHeaders;
+    // Signing seam (RT-F13): validation, key-loading, and the Ed25519 sign
+    // operation all delegate to base's `AgentIdentity` — never
+    // `prepareSignedRequest`/`serializeBody`, which re-serialize a JS payload
+    // and would corrupt the body hash for an already-serialized, cloned
+    // request body like this one. Nonce/timestamp generation stays
+    // adapter-owned (`randomUUID()` / `toISOString()`) rather than switching
+    // to base's own generators (different wire format) — this keeps the
+    // signed output byte-for-byte identical to what this seam has always
+    // emitted; only the underlying crypto primitive moves to base.
+    let identityHeaders: Record<string, string>;
     try {
-      identityHeaders = createAgentIdentityHeaders({
-        body: bodyBytes,
-        did: opts.agentDid as string,
-        method: params.request.method,
-        pathname: new URL(params.request.url).pathname,
-        privateKey: opts.agentPrivateKey as string
-      });
+      const identity = AgentIdentity.fromPrivateKey(
+        opts.agentDid as string,
+        opts.agentPrivateKey as string
+      );
+      const timestamp = new Date().toISOString();
+      const nonce = randomUUID();
+      const bodySha256 = createHash("sha256").update(bodyBytes).digest("hex");
+      const canonical = buildCanonicalString(
+        params.request.method,
+        new URL(params.request.url).pathname,
+        timestamp,
+        nonce,
+        bodySha256
+      );
+
+      identityHeaders = {
+        [HEADER_DID]: identity.agentDid,
+        [HEADER_TIMESTAMP]: timestamp,
+        [HEADER_NONCE]: nonce,
+        [HEADER_BODY_SHA256]: bodySha256,
+        [HEADER_SIGNATURE]: identity.sign(canonical)
+      };
     } catch (err) {
       controller?.logger.warn?.({
         err,
-        note: "openbox before-request: createAgentIdentityHeaders threw — skipping DID signing"
+        note: "openbox before-request: DID identity signing threw — skipping DID signing"
       });
       return undefined;
     }

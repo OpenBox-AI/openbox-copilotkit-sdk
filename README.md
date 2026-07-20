@@ -7,18 +7,18 @@
 
 Server-only governance and observability SDK for [CopilotKit](https://www.copilotkit.ai/) `runtime/v2`. Attaches at the CopilotKit boundary to observe frontend tools, AG-UI final messages, and HITL approvals — the seams a per-framework SDK can't see.
 
-> **Beta.** Public APIs may change before `1.0.0`. Pin a tilde range (`~0.3.0`) until then.
+> **Beta.** Public APIs may change before `1.0.0`. Pin a tilde range (`~0.4.0`) until then. Deprecated surfaces (the `./client`/`./config`/`./identity`/`./types` subpaths, `enforceApprovals`, and legacy config aliases) are removed at `1.0.0` — see [`MIGRATION.md`](./MIGRATION.md).
 
 ## Features
 
 - **One-line adopter integration** — wrap `CopilotRuntimeOptions` with `withOpenBoxRuntime()`; no other code changes required.
 - **AG-UI middleware** — observes every `TOOL_CALL_*`, `TEXT_MESSAGE_*`, `RUN_*` event and ships them to the OpenBox API as `workflow_type: "copilotkit"`.
-- **Telemetry-default, enforcement opt-in** — records everything, blocks nothing until you set `enforceApprovals: true`.
-- **Verdict surface** — 5-case discriminated union (`allow` / `block` / `constrain` / `require_approval` / `halt`). `allow` and `block` are wired today; the rest throw `VerdictNotImplementedError` (see [Release Status](#release-status)).
+- **Telemetry-default, enforcement opt-in** — records everything by default. Two independent, explicit enforcement boundaries opt in via `enforcement` (`OpenBoxEnforcementOptions`): the frontend AG-UI delivery gate, and `createOpenBoxCopilotKit(...).serverTool()`, which prevents a wrapped server tool's `execute` from running at all on a non-allow verdict. An unwrapped server tool, an MCP tool, or an external-agent call is always observation-only — see [Boundary truthfulness in MIGRATION.md](./MIGRATION.md#boundary-truthfulness--read-this-if-you-rely-on-this-sdk-for-governance).
+- **Verdict enforcement** — BLOCK, HALT, and REQUIRE_APPROVAL (real approval waiting) are enforced at the boundaries above. CONSTRAIN is **not supported** in `0.4.0`: an enforcing caller raises an explicit, typed `CopilotKitUnsupportedVerdictError` rather than silently allowing it.
 - **Tool-span synthesis** — synthesize `function_call` spans from AG-UI tool-call triples with hashed args/results, idempotency key, audit envelope, and JSONPath-based redaction.
-- **DID-signed governance requests** — Ed25519 5-header envelope when `OPENBOX_AGENT_DID` + `OPENBOX_AGENT_PRIVATE_KEY` are set.
+- **DID-signed governance requests** — Ed25519 5-header envelope when `OPENBOX_AGENT_DID` + `OPENBOX_AGENT_PRIVATE_KEY` are set (signing itself is delegated to `@openbox-ai/openbox-sdk-ts`).
 - **Co-runs with `@openbox-ai/openbox-mastra-sdk`** — each SDK observes a boundary the other doesn't; no duplicate spans.
-- **No OpenTelemetry dependency** — events flow exclusively via `client.evaluate(payload)`; your app keeps full control of its own `TracerProvider`.
+- **No OpenTelemetry dependency by default** — events flow via the base SDK's client; instrumentation (HTTP/DB/file) is available but off unless explicitly enabled.
 
 ## Requirements
 
@@ -157,9 +157,9 @@ A dev-only debug route can drain the buffer for inspection — see [`docs/integr
 | Version | Status | Highlights |
 |---|---|---|
 | **`0.2.0-beta.0`** | Published (2026-06-29) | Public framework + shared APIs, AG-UI middleware, frontend-tool labelling, DID-signed requests, OTel install removed. |
-| **`0.3.0`** | Current (2026-06-30) | Verdict discriminated union, `SpanBuffer`, tool-span synthesis, sibling-event hook transport. |
-| **`0.4.0`** (planned) | — | `constrain` and `halt` enforcement wired. |
-| **`0.5.0`** (planned) | — | `require_approval` polling wired; targeting `1.0.0` stability. |
+| **`0.3.0`** | Published (2026-06-30) | Verdict discriminated union, `SpanBuffer`, tool-span synthesis, sibling-event hook transport (not wired into real enforcement). |
+| **`0.4.0`** | Current | Thin adapter over `@openbox-ai/openbox-sdk-ts`; `createOpenBoxCopilotKit`/`serverTool()` pre-execution enforcement; real `REQUIRE_APPROVAL` waiting; truthful interrupt/resume semantics; non-blocking bounded telemetry; opt-in instrumentation. HALT/BLOCK/REQUIRE_APPROVAL enforced — CONSTRAIN explicitly unsupported (typed failure), not silently allowed. See [`MIGRATION.md`](./MIGRATION.md). |
+| **`1.0.0`** (planned) | — | Removes the deprecated `./client`/`./config`/`./identity`/`./types` facade subpaths and the deprecated `enforceApprovals`/config-alias fields; targets API stability. |
 
 See [`docs/project-roadmap.md`](./docs/project-roadmap.md) and [`CHANGELOG.md`](./CHANGELOG.md) for full history. Migration notes live in [`MIGRATION.md`](./MIGRATION.md).
 
@@ -180,6 +180,7 @@ npm run ci:check   # lint + typecheck + test + build + CI guards
 - Vitest with coverage (lines/statements 60%, functions 70%, branches 50%).
 - `scripts/check-no-otel.mjs` — fails the build if any `@opentelemetry/*` import re-enters the SDK.
 - `scripts/check-no-mastra-imports.mjs` — fails if any `@mastra/*` import sneaks in (the SDK is framework-agnostic).
+- `scripts/check-no-duplicate-signing.mjs` — fails if production `src/` re-implements Core endpoints, `X-OpenBox-Agent-*` header construction, or canonical signing-byte assembly instead of delegating to `@openbox-ai/openbox-sdk-ts`.
 
 Commits follow the Conventional Commits format. Do not include AI-attribution lines.
 
