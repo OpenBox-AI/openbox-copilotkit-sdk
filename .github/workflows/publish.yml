@@ -12,6 +12,11 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # Bound to the `release` environment so its deployment tag policy admits
+    # only `v[0-9]+.[0-9]+.[0-9]+` refs, its env-scoped secrets scope, and its
+    # OIDC token carries `environment:release` — which the npm trusted-publisher
+    # rule (when registered) matches on.
+    environment: release
     steps:
       - uses: actions/checkout@v4
 
