@@ -41,8 +41,7 @@ import type {
 
 export { COPILOTKIT_TASK_QUEUE, COPILOTKIT_WORKFLOW_TYPE };
 
-export const USER_INPUT_SIGNAL_NAME = "user_input";
-export const AGENT_OUTPUT_SIGNAL_NAME = "agent_output";
+export { USER_PROMPT_SIGNAL_NAME } from "./lifecycle-events.js";
 
 /**
  * Carrier for a synthesized `function_call` span. It is emitted as a separate
@@ -114,6 +113,7 @@ export class OpenBoxCopilotKitEmitter {
   readonly #privacy: PrivacyConfig;
   readonly #redactPaths: string[] | undefined;
   readonly #telemetryQueue: LifecycleTelemetryQueue;
+  readonly #controller: OpenBoxRuntimeController;
 
   public constructor(
     controller: OpenBoxRuntimeController,
@@ -126,6 +126,42 @@ export class OpenBoxCopilotKitEmitter {
     this.#redactPaths = redactPaths;
     this.#privacy = mergeRedactPathsIntoPrivacy(controller.runtime.config.privacy, redactPaths);
     this.#telemetryQueue = controller.telemetryQueue;
+    this.#controller = controller;
+  }
+
+  /**
+   * Hook span(s) of an activity, sent as wire `ActivityStarted` with
+   * `hook_trigger: true` on the run's telemetry queue (so they keep the
+   * run's order). `spans` are flat Core span dicts.
+   */
+  public emitHookSpans(
+    activity: { activityId: string; activityType: string; runId: string; workflowId: string },
+    spans: Record<string, unknown>[]
+  ): void {
+    if (spans.length === 0) {
+      return;
+    }
+    const payload = withBaseEnvelope({
+      activity_id: activity.activityId,
+      activity_type: activity.activityType,
+      event_type: WorkflowEventType.ACTIVITY_STARTED,
+      hook_trigger: true,
+      run_id: activity.runId,
+      span_count: spans.length,
+      spans,
+      workflow_id: activity.workflowId,
+      workflow_type: COPILOTKIT_WORKFLOW_TYPE
+    });
+    this.#enqueueTelemetry(
+      payload as Record<string, JsonValue>,
+      {
+        activityId: activity.activityId,
+        eventType: WorkflowEventType.ACTIVITY_STARTED,
+        workflowId: activity.workflowId
+      },
+      activity.runId,
+      false
+    );
   }
 
   // Not `async`: pure telemetry — enqueue is synchronous and the method must
@@ -317,9 +353,11 @@ export class OpenBoxCopilotKitEmitter {
     });
   }
 
-  public emitWorkflowCompleted(
+  public async emitWorkflowCompleted(
     input: WorkflowCompletedInput
   ): Promise<GovernanceVerdictResponse | null> {
+    // Core drops spans that arrive after a session closes.
+    await this.#controller.openRouterProvenance?.drainRun(input.runId);
     const { payload } = prepareLifecyclePayload(buildWorkflowCompletedEnvelope(input), {
       privacy: this.#privacy
     });
@@ -329,12 +367,13 @@ export class OpenBoxCopilotKitEmitter {
       eventType: WorkflowEventType.WORKFLOW_COMPLETED,
       workflowId: input.workflowId
     }, input.runId, true);
-    return Promise.resolve(null);
+    return null;
   }
 
-  public emitWorkflowFailed(
+  public async emitWorkflowFailed(
     input: WorkflowFailedInput
   ): Promise<GovernanceVerdictResponse | null> {
+    await this.#controller.openRouterProvenance?.drainRun(input.runId);
     const { payload } = prepareLifecyclePayload(buildWorkflowFailedEnvelope(input), {
       privacy: this.#privacy
     });
@@ -344,7 +383,7 @@ export class OpenBoxCopilotKitEmitter {
       eventType: WorkflowEventType.WORKFLOW_FAILED,
       workflowId: input.workflowId
     }, input.runId, true);
-    return Promise.resolve(null);
+    return null;
   }
 
   /**
@@ -415,6 +454,7 @@ export class OpenBoxCopilotKitEmitter {
     );
 
     try {
+      await this.#telemetryQueue.drainRun(input.runId);
       // Signed AS THE CHILD: `childClient` is a base `OpenBoxClient` scoped to
       // the child's own DID/key (see `openbox-middleware.ts#buildChildClient`),
       // never the controller's own parent-scoped `#client`.
@@ -468,6 +508,7 @@ export class OpenBoxCopilotKitEmitter {
     this.#notifyObserver(payload, emissionMeta);
 
     try {
+      await this.#telemetryQueue.drainRun(typeof payload.run_id === "string" ? payload.run_id : "");
       // The base client's `evaluate` takes a prepared `JsonValue` and
       // resolves a base `EvaluationResult`. This SDK still reads that result
       // through its own local `GovernanceVerdictResponse` shape — every field

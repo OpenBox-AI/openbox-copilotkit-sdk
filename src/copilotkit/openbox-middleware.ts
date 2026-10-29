@@ -38,11 +38,10 @@ import { CopilotKitGovernanceControlError } from "./governance-control-error.js"
 import { DEFAULT_INTERRUPT_TTL_MS, type PendingInterrupt } from "./internal/interrupt-store.js";
 import type { ActivityStartedInput } from "./lifecycle-events.js";
 import {
-  AGENT_OUTPUT_SIGNAL_NAME,
   COPILOTKIT_TASK_QUEUE,
   COPILOTKIT_WORKFLOW_TYPE,
   OpenBoxCopilotKitEmitter,
-  USER_INPUT_SIGNAL_NAME
+  USER_PROMPT_SIGNAL_NAME
 } from "./openbox-emitter.js";
 import {
   parseResumeEntries,
@@ -99,6 +98,10 @@ interface ToolCallBufferEntry {
 }
 
 interface PerRunState {
+  // The CopilotKit agent the run belongs to; titles the run's own rows.
+  agentId: string | undefined;
+  // Set once the run's terminal WorkflowFailed was sent by a gate refusal.
+  closed: boolean;
   // Dedup keys for already-emitted handoffs:
   // `${multiAgentSessionId}::${fromAgentDid}::${childAgentName}::${parentActivityId}`.
   emittedHandoffs: Set<string>;
@@ -226,7 +229,9 @@ export class OpenBoxMiddleware extends Middleware {
         toolCallBuffer: new Map(),
         userInput: extractLastUserMessage(input.messages),
         workflowId: input.threadId,
-        workflowStarted: false
+        workflowStarted: false,
+        agentId: undefined,
+        closed: false
       };
 
       let blocked = false;
@@ -383,6 +388,7 @@ export class OpenBoxMiddleware extends Middleware {
       case EventType.RUN_STARTED: {
         if (!state.workflowStarted) {
           state.workflowStarted = true;
+          state.agentId = agentId;
           await this.#emitter.emitWorkflowStarted({
             agentId,
             goal,
@@ -393,20 +399,17 @@ export class OpenBoxMiddleware extends Middleware {
             userInput: state.userInput,
             workflowId: state.workflowId
           });
+          // The run's one SignalReceived: the user's prompt as text.
           await this.#emitter.emitSignalReceived({
             goal,
             metadata,
             multiAgentSessionId: state.multiAgentSessionId,
-            // In multi-agent mode the signal is array-shaped for the OpenBox
-            // timeline; pass the user's text so element 0 renders cleanly
-            // instead of a JSON-stringified message object.
-            payload: state.multiAgentSessionId
-              ? extractUserText(state.userInput)
-              : state.userInput,
+            payload: extractUserText(state.userInput),
             runId: state.runId,
-            signalName: USER_INPUT_SIGNAL_NAME,
+            signalName: USER_PROMPT_SIGNAL_NAME,
             workflowId: state.workflowId
           });
+          this.#runtime.openRouterProvenance?.markRunStarted?.(state.runId);
         }
         return undefined;
       }
@@ -565,6 +568,8 @@ export class OpenBoxMiddleware extends Middleware {
           return blockResult;
         }
         await this.#emitter.emitWorkflowFailed({
+          agentId: state.agentId,
+          durationMs: Math.max(0, Date.now() - state.startTime),
           error,
           goal,
           metadata,
@@ -639,17 +644,9 @@ export class OpenBoxMiddleware extends Middleware {
     if (blockResult) {
       return blockResult;
     }
-    await this.#emitter.emitSignalReceived({
-      goal,
-      metadata,
-      multiAgentSessionId: state.multiAgentSessionId,
-      payload: state.outputText,
-      runId: state.runId,
-      signalName: AGENT_OUTPUT_SIGNAL_NAME,
-      workflowId: state.workflowId
-    });
     this.#runtime.runTerminalState.markOutputEmitted(state.runId);
     await this.#emitter.emitWorkflowCompleted({
+      agentId: state.agentId ?? agentId,
       agentOutput: state.outputText,
       durationMs: Math.max(0, endTime - state.startTime),
       endTime,
@@ -742,11 +739,15 @@ export class OpenBoxMiddleware extends Middleware {
     state: PerRunState;
   }): Promise<boolean> {
     const originalRunId = state.parentRunId ?? state.runId;
+    let originalWorkflowId: string | undefined;
+    let originalMultiAgentSessionId: string | undefined;
 
     for (const entry of state.resumeEntries) {
       const pending = this.#runtime.interruptStore.take(originalRunId, entry.interruptId);
       if (!pending) {
         await this.#emitter.emitWorkflowFailed({
+          agentId: state.agentId,
+          durationMs: Math.max(0, Date.now() - state.startTime),
           error: {
             message: `Resume references an unknown or expired interrupt id: ${entry.interruptId}`,
             name: "OpenBoxInterruptResumeCorrelationError"
@@ -781,6 +782,28 @@ export class OpenBoxMiddleware extends Middleware {
         toolName: pending.toolName,
         workflowId: pending.workflowId
       });
+      originalWorkflowId = pending.workflowId;
+      originalMultiAgentSessionId = pending.multiAgentSessionId;
+    }
+
+    // The interrupted run suspended without a terminal event; once its last
+    // interrupt is resolved, it is over. (A resume under the same run id is
+    // closed by this run's own outcome instead.)
+    const interrupts = this.#runtime.interruptStore;
+    if (
+      originalRunId !== state.runId &&
+      originalWorkflowId !== undefined &&
+      !(interrupts.hasPending?.(originalRunId) ?? false)
+    ) {
+      await this.#emitter.emitWorkflowCompleted({
+        agentId: state.agentId,
+        goal,
+        metadata,
+        multiAgentSessionId: originalMultiAgentSessionId,
+        runId: originalRunId,
+        workflowId: originalWorkflowId
+      });
+      interrupts.clearRun(originalRunId);
     }
 
     return false;
@@ -894,6 +917,9 @@ export class OpenBoxMiddleware extends Middleware {
       return undefined;
     }
 
+    // The model call that chose this tool closes before the tool starts.
+    await this.#runtime.openRouterProvenance?.settleRun?.(state.runId);
+
     // RT-F15 duplicate-suppression: a wrapped server tool
     // (`bundle.serverTool()`) already claimed `(runId, toolCallId)` ownership
     // and emitted its OWN ActivityStarted/Completed for this call (Phase 5).
@@ -931,6 +957,13 @@ export class OpenBoxMiddleware extends Middleware {
       entry.activityStarted = true;
       entry.lastVerdict = enforced.verdict;
       if (enforced.blockEvent) {
+        await this.#closeRefusedRun({
+          agentId,
+          failure: enforced.failure ?? { message: "Blocked by governance", name: "GovernanceBlockedError" },
+          goal,
+          metadata,
+          state
+        });
         return enforced.blockEvent;
       }
       // A blocked delegation never hands off; the Handoff is emitted only after a
@@ -978,10 +1011,13 @@ export class OpenBoxMiddleware extends Middleware {
     input: ActivityStartedInput
   ): Promise<{
     blockEvent: GovernanceBlockedErrorEvent | undefined;
+    failure?: Record<string, unknown>;
     verdict: GovernanceVerdictResponse | null;
   }> {
     const envelope = this.#emitter.prepareActivityStartedForEnforcement(input);
     try {
+      // The run's queued events (WorkflowStarted, the prompt) reach Core first.
+      await this.#runtime.telemetryQueue.drainRun(input.runId);
       const result = await this.#runtime.runtime.evaluateLifecycle(envelope);
       if (!isProceedableVerdict(result.verdict)) {
         throw new CopilotKitUnsupportedVerdictError(
@@ -1006,6 +1042,7 @@ export class OpenBoxMiddleware extends Middleware {
       });
       return {
         blockEvent: createGovernanceBlockedErrorEvent(resolveEnforcementCorrelationId(err)),
+        failure: { message: controlError.message, name: controlError.name },
         verdict: null
       };
     }
@@ -1145,6 +1182,61 @@ export class OpenBoxMiddleware extends Middleware {
     }
   }
 
+  /**
+   * End a run the enforcing gate refused (block, halt, or a rejected/expired
+   * approval): the blocked AG-UI stream ends here, so Core must see the run
+   * end too. Every activity already reported as started is closed as failed
+   * (the refused one included); calls never reported are dropped — they never
+   * ran. No new evaluation is requested. Then WorkflowFailed, then the run's
+   * state is released.
+   */
+  async #closeRefusedRun({
+    agentId,
+    failure,
+    goal,
+    metadata,
+    state
+  }: {
+    agentId?: string | undefined;
+    failure: Record<string, unknown>;
+    goal?: string | undefined;
+    metadata?: Record<string, unknown> | undefined;
+    state: PerRunState;
+  }): Promise<void> {
+    if (state.closed) {
+      return;
+    }
+    state.closed = true;
+    for (const [activityId, entry] of state.toolCallBuffer) {
+      if (entry.activityStarted && !entry.completed) {
+        entry.activityArgs ??= parseToolArgs(entry.args);
+        entry.endTime ??= Date.now();
+        await this.#emitActivityCompleted({
+          activityId,
+          agentId,
+          entry,
+          error: failure,
+          goal,
+          metadata,
+          state,
+          status: "failed"
+        });
+      }
+    }
+    state.toolCallBuffer.clear();
+    await this.#emitter.emitWorkflowFailed({
+      agentId: state.agentId ?? agentId,
+      durationMs: Math.max(0, Date.now() - state.startTime),
+      error: failure,
+      goal,
+      metadata,
+      multiAgentSessionId: state.multiAgentSessionId,
+      runId: state.runId,
+      workflowId: state.workflowId
+    });
+    await this.#clearRunOnTerminal(state);
+  }
+
   async #emitWorkflowFailedFromError(
     state: PerRunState,
     err: unknown
@@ -1168,7 +1260,12 @@ export class OpenBoxMiddleware extends Middleware {
       state,
       status: "failed"
     });
+    if (state.closed) {
+      return;
+    }
     await this.#emitter.emitWorkflowFailed({
+      agentId: state.agentId,
+      durationMs: Math.max(0, Date.now() - state.startTime),
       error,
       goal: context?.goal,
       metadata: context?.metadata,

@@ -43,7 +43,10 @@ export type {
 
 const DEFAULT_MAX_CONCURRENT_SENDS = 8;
 const DEFAULT_MAX_PENDING_EVENTS = 1000;
-const DEFAULT_FLUSH_TIMEOUT_MS = 5000;
+// A run's events send one after another, about a second each against Core
+// v3 (workload token + evaluate), so a short budget dropped the run's closing
+// WorkflowCompleted when a process shut down right after a run.
+const DEFAULT_FLUSH_TIMEOUT_MS = 30_000;
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => {
@@ -144,6 +147,17 @@ export class LifecycleTelemetryQueue {
   }
 
   /** Bounded drain: wait for every currently in-flight/queued send, up to `timeoutMs` (default `flushTimeoutMs`). Reports the count not flushed. */
+  /**
+   * Resolves once every event already queued for `runId` has been sent (or
+   * failed). A caller that sends one of the run's events DIRECTLY — the
+   * enforcing gates, hook spans, handoffs — awaits this first, so Core never
+   * receives that event ahead of the run's earlier queued events (e.g. a
+   * tool's ActivityStarted before the run's WorkflowStarted).
+   */
+  drainRun(runId: string): Promise<void> {
+    return this.#runChains.get(runId) ?? Promise.resolve();
+  }
+
   async flush(timeoutMs?: number): Promise<{ notFlushed: number }> {
     const budget = timeoutMs ?? this.#flushTimeoutMs;
     const tails = [...this.#runChains.values()];
@@ -178,8 +192,7 @@ export class LifecycleTelemetryQueue {
     this.#runChains.set(runId, tail);
     // Self-cleaning: once nothing has extended this run's chain past `tail`,
     // the map entry is stale — bounds the map even for a caller that never
-    // triggers an explicit terminal event or `endRun` (e.g. after-request.ts's
-    // standalone assistant_message signal has no Observable teardown).
+    // triggers an explicit terminal event or `endRun`.
     void tail.then(() => {
       if (this.#runChains.get(runId) === tail) {
         this.#runChains.delete(runId);
